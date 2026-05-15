@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#07070a" />
+  <title>LOOP · Microaprendizaje</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main id="app" class="app-shell"></main>
+
+  <dialog id="comment-dialog" class="comment-dialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Feedback cualitativo</p>
+          <h2>Comentario sobre el vídeo</h2>
+        </div>
+        <button class="icon-btn" value="cancel" aria-label="Cerrar">×</button>
+      </div>
+      <p id="comment-video-title" class="dialog-video-title"></p>
+      <textarea id="comment-input" rows="5" placeholder="Ej.: buen vídeo, pero demasiado básico; necesito más ejemplos prácticos..."></textarea>
+      <menu class="dialog-actions">
+        <button class="ghost-btn" value="cancel">Cancelar</button>
+        <button class="primary-btn" id="save-comment-btn" value="default">Guardar comentario</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="./src/data.js"></script>
+  <script src="./src/app.js"></script>
+</body>
+</html>
