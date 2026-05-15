@@ -1,0 +1,33 @@
+{
+  "name": "LOOP · Microaprendizaje",
+  "short_name": "LOOP",
+  "description": "Microaprendizaje en vídeos cortos con experiencia tipo Shorts.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#050507",
+  "theme_color": "#050507",
+  "categories": ["education", "productivity", "entertainment"],
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
