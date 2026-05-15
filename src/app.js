@@ -17,6 +17,8 @@ let touchStartX = null;
 let touchStartedOnControl = false;
 let wheelLock = false;
 let toastTimer = null;
+let progressTimer = null;
+let isSeeking = false;
 
 const state = {
   screen: 'intro',
@@ -36,6 +38,12 @@ try {
   if (typeof lastState.muted === 'boolean') state.muted = lastState.muted;
 } catch (error) {
   console.warn('LOOP: could not restore last state', error);
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./service-worker.js').catch(error => console.warn('LOOP: service worker not registered', error));
+  });
 }
 
 function persistState() {
@@ -62,6 +70,13 @@ function durationSeconds(duration) {
   const match = String(duration).match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) return duration || '0s';
   return `${Number(match[1] || 0) * 60 + Number(match[2] || 0)}s`;
+}
+
+function formatClock(seconds = 0) {
+  const safe = Math.max(0, Math.floor(seconds || 0));
+  const minutes = Math.floor(safe / 60);
+  const rest = String(safe % 60).padStart(2, '0');
+  return `${minutes}:${rest}`;
 }
 
 function formatViews(value) {
@@ -104,7 +119,13 @@ function ensureYouTubeApi() {
   return ytApiPromise;
 }
 
+function stopProgressPolling() {
+  clearInterval(progressTimer);
+  progressTimer = null;
+}
+
 function destroyPlayer() {
+  stopProgressPolling();
   playerReady = false;
   if (player?.destroy) {
     try { player.destroy(); } catch (error) { console.warn('LOOP: could not destroy player', error); }
@@ -145,6 +166,7 @@ async function mountPlayer(video) {
         event.target.playVideo();
         state.paused = false;
         updatePlaybackControls();
+        startProgressPolling();
 
         setTimeout(() => {
           if (!player?.getPlayerState) return;
@@ -161,6 +183,7 @@ async function mountPlayer(video) {
         if (event.data === window.YT.PlayerState.PLAYING) {
           state.paused = false;
           updatePlaybackControls();
+          startProgressPolling();
         }
         if (event.data === window.YT.PlayerState.PAUSED) {
           state.paused = true;
@@ -169,6 +192,37 @@ async function mountPlayer(video) {
       }
     }
   });
+}
+
+function startProgressPolling() {
+  stopProgressPolling();
+  updateProgressBar();
+  progressTimer = setInterval(updateProgressBar, 350);
+}
+
+function updateProgressBar() {
+  if (!playerReady || !player || isSeeking) return;
+  const slider = document.querySelector('.progress-slider');
+  const time = document.querySelector('[data-progress-time]');
+  if (!slider) return;
+
+  const duration = Number(player.getDuration?.() || 0);
+  const current = Number(player.getCurrentTime?.() || 0);
+  if (!duration) return;
+
+  slider.max = String(duration);
+  slider.value = String(current);
+  slider.style.setProperty('--progress', `${Math.min(100, (current / duration) * 100)}%`);
+  if (time) time.textContent = `${formatClock(current)} / ${formatClock(duration)}`;
+}
+
+function seekToSliderValue(value) {
+  if (!playerReady || !player) return;
+  const seconds = Number(value || 0);
+  player.seekTo(seconds, true);
+  const slider = document.querySelector('.progress-slider');
+  const duration = Number(slider?.max || player.getDuration?.() || 0);
+  if (slider && duration) slider.style.setProperty('--progress', `${Math.min(100, (seconds / duration) * 100)}%`);
 }
 
 function nextVideo() {
@@ -250,7 +304,6 @@ function topicButton(topic) {
 }
 
 function renderFeed() {
-  const list = filteredVideos();
   const video = currentVideo();
 
   if (!video) {
@@ -282,11 +335,13 @@ function renderFeed() {
           <button class="rail-btn positive" data-action="more"><span>＋</span><small>Más</small></button>
           <button class="rail-btn" data-action="less"><span>−</span><small>Menos</small></button>
           <button class="rail-btn" data-action="comment"><span>💬</span><small>Comentar</small></button>
-          <button class="rail-btn" data-action="toggle-play"><span data-play-icon>${state.paused ? '▶' : 'Ⅱ'}</span><small data-play-label>${state.paused ? 'Play' : 'Pausa'}</small></button>
           <button class="rail-btn" data-action="toggle-mute"><span data-mute-icon>${state.muted ? '🔇' : '🔊'}</span><small data-mute-label>${state.muted ? 'Sonido' : 'Mute'}</small></button>
-          <button class="rail-btn" data-action="toggle-copy"><span data-copy-icon>${state.hideCopy ? 'Aa' : '⌄'}</span><small data-copy-label>${state.hideCopy ? 'Texto' : 'Ocultar'}</small></button>
           <button class="rail-btn" data-action="toggle-info"><span>?</span><small>Info</small></button>
         </aside>
+
+        <button class="copy-tab ${state.hideCopy ? 'is-hidden-copy' : ''}" data-action="toggle-copy">
+          <span data-copy-label>${state.hideCopy ? 'Mostrar texto' : 'Ocultar texto'}</span>
+        </button>
 
         <section class="short-copy ${state.hideCopy ? 'is-hidden' : ''}">
           <div class="video-meta-line">
@@ -302,14 +357,18 @@ function renderFeed() {
           </div>
         </section>
 
-        <button class="text-restore ${state.hideCopy ? 'visible' : ''}" data-action="toggle-copy">Mostrar texto</button>
+        <div class="progress-shell">
+          <input class="progress-slider" type="range" min="0" max="100" value="0" step="0.1" aria-label="Progreso del vídeo" />
+          <span data-progress-time>0:00 / 0:00</span>
+        </div>
 
         <nav class="bottom-topic-bar" aria-label="Cambiar tema">
           ${topics().map(topic => topicButton(topic)).join('')}
         </nav>
 
         <section class="info-sheet ${state.showInfo ? 'open' : ''}" aria-hidden="${state.showInfo ? 'false' : 'true'}">
-          <div class="sheet-handle"></div>
+          <button class="sheet-close" data-action="close-info" aria-label="Cerrar información">×</button>
+          <button class="sheet-handle" data-action="close-info" aria-label="Cerrar información"></button>
           <p class="mini-label">Filtro LOOP</p>
           <h2>Por qué aparece</h2>
           <p>${video.reason}</p>
@@ -342,26 +401,28 @@ function showToast(message) {
 }
 
 function updatePlaybackControls() {
-  const playIcon = document.querySelector('[data-play-icon]');
-  const playLabel = document.querySelector('[data-play-label]');
   const muteIcon = document.querySelector('[data-mute-icon]');
   const muteLabel = document.querySelector('[data-mute-label]');
   const pausedIndicator = document.querySelector('.paused-indicator');
 
-  if (playIcon) playIcon.textContent = state.paused ? '▶' : 'Ⅱ';
-  if (playLabel) playLabel.textContent = state.paused ? 'Play' : 'Pausa';
   if (muteIcon) muteIcon.textContent = state.muted ? '🔇' : '🔊';
   if (muteLabel) muteLabel.textContent = state.muted ? 'Sonido' : 'Mute';
   if (pausedIndicator) pausedIndicator.classList.toggle('visible', state.paused);
 }
 
+function updateInfoVisibility() {
+  const sheet = document.querySelector('.info-sheet');
+  if (!sheet) return;
+  sheet.classList.toggle('open', state.showInfo);
+  sheet.setAttribute('aria-hidden', state.showInfo ? 'false' : 'true');
+}
+
 function updateCopyVisibility() {
   document.querySelector('.short-copy')?.classList.toggle('is-hidden', state.hideCopy);
-  document.querySelector('.text-restore')?.classList.toggle('visible', state.hideCopy);
-  const copyIcon = document.querySelector('[data-copy-icon]');
+  const tab = document.querySelector('.copy-tab');
   const copyLabel = document.querySelector('[data-copy-label]');
-  if (copyIcon) copyIcon.textContent = state.hideCopy ? 'Aa' : '⌄';
-  if (copyLabel) copyLabel.textContent = state.hideCopy ? 'Texto' : 'Ocultar';
+  if (tab) tab.classList.toggle('is-hidden-copy', state.hideCopy);
+  if (copyLabel) copyLabel.textContent = state.hideCopy ? 'Mostrar texto' : 'Ocultar texto';
 }
 
 function setVote(vote) {
@@ -453,16 +514,44 @@ app.addEventListener('click', event => {
   if (action === 'more') setVote('more');
   if (action === 'less') setVote('less');
   if (action === 'comment') openComment();
-  if (action === 'toggle-info') { state.showInfo = !state.showInfo; renderFeed(); }
+  if (action === 'toggle-info') { state.showInfo = !state.showInfo; updateInfoVisibility(); }
+  if (action === 'close-info') { state.showInfo = false; updateInfoVisibility(); }
   if (action === 'toggle-play') togglePlay();
   if (action === 'toggle-mute') toggleMute();
   if (action === 'toggle-copy') { state.hideCopy = !state.hideCopy; updateCopyVisibility(); }
 });
 
+app.addEventListener('input', event => {
+  const slider = event.target.closest('.progress-slider');
+  if (!slider) return;
+  isSeeking = true;
+  const duration = Number(slider.max || 0);
+  const value = Number(slider.value || 0);
+  if (duration) slider.style.setProperty('--progress', `${Math.min(100, (value / duration) * 100)}%`);
+  document.querySelector('[data-progress-time]') && (document.querySelector('[data-progress-time]').textContent = `${formatClock(value)} / ${formatClock(duration)}`);
+});
+
+app.addEventListener('change', event => {
+  const slider = event.target.closest('.progress-slider');
+  if (!slider) return;
+  seekToSliderValue(slider.value);
+  isSeeking = false;
+});
+
+app.addEventListener('pointerdown', event => {
+  if (event.target.closest('.progress-slider')) isSeeking = true;
+});
+
+app.addEventListener('pointerup', event => {
+  const slider = event.target.closest('.progress-slider') || document.querySelector('.progress-slider');
+  if (isSeeking && slider) seekToSliderValue(slider.value);
+  isSeeking = false;
+});
+
 app.addEventListener('touchstart', event => {
   touchStartY = event.touches[0].clientY;
   touchStartX = event.touches[0].clientX;
-  touchStartedOnControl = Boolean(event.target.closest('button, textarea, .topic-chip, .info-sheet, .action-rail, .bottom-topic-bar'));
+  touchStartedOnControl = Boolean(event.target.closest('button, input, textarea, .topic-chip, .info-sheet, .action-rail, .bottom-topic-bar, .progress-shell'));
 }, { passive: true });
 
 app.addEventListener('touchend', event => {
@@ -482,7 +571,7 @@ app.addEventListener('touchend', event => {
 }, { passive: true });
 
 app.addEventListener('wheel', event => {
-  if (state.screen !== 'feed' || wheelLock) return;
+  if (state.screen !== 'feed' || wheelLock || event.target.closest('.progress-shell, .info-sheet')) return;
   if (Math.abs(event.deltaY) < 45) return;
   wheelLock = true;
   event.deltaY > 0 ? nextVideo() : prevVideo();
@@ -499,7 +588,7 @@ document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() === 'c') openComment();
   if (event.key.toLowerCase() === 's') toggleMute();
   if (event.key.toLowerCase() === 't') { state.hideCopy = !state.hideCopy; updateCopyVisibility(); }
-  if (event.key === 'Escape' && state.showInfo) { state.showInfo = false; renderFeed(); }
+  if (event.key === 'Escape' && state.showInfo) { state.showInfo = false; updateInfoVisibility(); }
 });
 
 render();
