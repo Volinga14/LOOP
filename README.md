@@ -6,11 +6,14 @@ LOOP es un prototipo de microaprendizaje en formato de vídeos cortos. Esta vers
 
 ## Estado actual
 
-- Aplicación estática sin dependencias.
+- Aplicación estática sin dependencias de build.
 - Pantalla de entrada simple con propuesta de valor y preview tipo Shorts.
-- Feed fullscreen con YouTube embed.
-- Navegación vertical con swipe, rueda de ratón, teclado y zonas táctiles.
-- Controles flotantes sobre el vídeo: Más, Menos, Comentario, Trash e Info.
+- Feed fullscreen con reproductor YouTube controlado mediante YouTube IFrame API.
+- Navegación vertical mediante swipe, rueda de ratón y teclado.
+- El vídeo ya no cambia por toque accidental sobre la pantalla.
+- Controles flotantes sobre el vídeo: Más, Menos, Comentario, Play/Pausa, Sonido/Mute, Ocultar texto e Info.
+- Botón Trash retirado temporalmente.
+- Texto del vídeo compacto, con opción para ocultarlo y recuperarlo.
 - Barra inferior de categorías con scroll horizontal.
 - Info educativa embebida en una sheet inferior: motivo de recomendación, calidad, utilidad y duración.
 - Feedback local guardado en `localStorage`.
