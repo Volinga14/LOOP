@@ -1,49 +1,60 @@
-const videos = window.LOOP_VIDEOS || [];
+const allVideos = window.LOOP_VIDEOS || [];
+const allTopics = window.LOOP_TOPICS || [];
+
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#comment-dialog');
 const commentInput = document.querySelector('#comment-input');
 const commentTitle = document.querySelector('#comment-video-title');
 const saveCommentBtn = document.querySelector('#save-comment-btn');
 
-const STORAGE_KEY = 'loopFeedback';
-const LAST_STATE_KEY = 'loopLastState';
+const STORAGE_KEY = 'loopFeedback.v2';
+const LAST_STATE_KEY = 'loopLastState.v2';
 const PLAYER_ID = 'yt-player';
 
 let player = null;
 let playerReady = false;
 let ytApiPromise = null;
+let progressTimer = null;
+let isSeeking = false;
+let toastTimer = null;
+let wheelLock = false;
 let touchStartY = null;
 let touchStartX = null;
 let touchStartedOnControl = false;
-let wheelLock = false;
-let toastTimer = null;
-let progressTimer = null;
-let isSeeking = false;
+let deferredInstallPrompt = null;
 
 const state = {
   screen: 'intro',
-  activeTopic: 'Todo',
+  activeTopic: allTopics[0]?.key || 'all',
+  activeSearch: '',
   index: 0,
   showInfo: false,
   hideCopy: false,
   muted: false,
   paused: false,
-  feedback: JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+  feedback: readJson(STORAGE_KEY, {})
 };
 
-try {
-  const lastState = JSON.parse(localStorage.getItem(LAST_STATE_KEY) || '{}');
-  if (lastState.activeTopic) state.activeTopic = lastState.activeTopic;
-  if (Number.isInteger(lastState.index)) state.index = lastState.index;
-  if (typeof lastState.muted === 'boolean') state.muted = lastState.muted;
-} catch (error) {
-  console.warn('LOOP: could not restore last state', error);
-}
+const lastState = readJson(LAST_STATE_KEY, {});
+if (lastState.activeTopic) state.activeTopic = lastState.activeTopic;
+if (Number.isInteger(lastState.index)) state.index = lastState.index;
+if (typeof lastState.muted === 'boolean') state.muted = lastState.muted;
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./service-worker.js').catch(error => console.warn('LOOP: service worker not registered', error));
   });
+}
+
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  updateInstallButton();
+});
+
+function readJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
+  catch { return fallback; }
 }
 
 function persistState() {
@@ -58,12 +69,35 @@ function saveFeedback() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.feedback));
 }
 
-function topics() {
-  return ['Todo', ...new Set(videos.map(video => video.topic))];
+function topicByKey(key) {
+  return allTopics.find(topic => topic.key === key);
+}
+
+function topicLabel(key) {
+  return topicByKey(key)?.label || 'LOOP';
 }
 
 function filteredVideos() {
-  return state.activeTopic === 'Todo' ? videos : videos.filter(video => video.topic === state.activeTopic);
+  if (state.activeSearch) {
+    const term = normalize(state.activeSearch);
+    return allVideos.filter(video =>
+      normalize(video.title).includes(term) ||
+      normalize(video.topic).includes(term) ||
+      normalize(video.topicKey).includes(term)
+    );
+  }
+  return allVideos.filter(video => video.topicKey === state.activeTopic);
+}
+
+function normalize(value = '') {
+  return String(value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function formatViews(value) {
+  const number = Number(value || 0);
+  if (number >= 1000000) return `${(number / 1000000).toFixed(1)}M`;
+  if (number >= 1000) return `${Math.round(number / 1000)}K`;
+  return number.toString();
 }
 
 function durationSeconds(duration) {
@@ -74,21 +108,15 @@ function durationSeconds(duration) {
 
 function formatClock(seconds = 0) {
   const safe = Math.max(0, Math.floor(seconds || 0));
-  const minutes = Math.floor(safe / 60);
-  const rest = String(safe % 60).padStart(2, '0');
-  return `${minutes}:${rest}`;
-}
-
-function formatViews(value) {
-  const number = Number(value || 0);
-  if (number >= 1000000) return `${(number / 1000000).toFixed(1)}M`;
-  if (number >= 1000) return `${Math.round(number / 1000)}K`;
-  return number.toString();
+  return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, '0')}`;
 }
 
 function clampIndex() {
   const list = filteredVideos();
-  if (!list.length) return;
+  if (!list.length) {
+    state.index = 0;
+    return;
+  }
   state.index = Math.max(0, Math.min(state.index, list.length - 1));
 }
 
@@ -102,20 +130,17 @@ function currentVideo() {
 function ensureYouTubeApi() {
   if (window.YT?.Player) return Promise.resolve();
   if (ytApiPromise) return ytApiPromise;
-
   ytApiPromise = new Promise(resolve => {
     const previousCallback = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
       if (typeof previousCallback === 'function') previousCallback();
       resolve();
     };
-
     const script = document.createElement('script');
     script.src = 'https://www.youtube.com/iframe_api';
     script.async = true;
     document.head.appendChild(script);
   });
-
   return ytApiPromise;
 }
 
@@ -140,7 +165,6 @@ async function mountPlayer(video) {
   if (currentVideo()?.id !== video.id) return;
 
   destroyPlayer();
-
   player = new window.YT.Player(PLAYER_ID, {
     videoId: video.video_id,
     host: 'https://www.youtube-nocookie.com',
@@ -167,16 +191,15 @@ async function mountPlayer(video) {
         state.paused = false;
         updatePlaybackControls();
         startProgressPolling();
-
         setTimeout(() => {
           if (!player?.getPlayerState) return;
           const status = player.getPlayerState();
           if (status !== window.YT.PlayerState.PLAYING) {
             state.paused = true;
             updatePlaybackControls();
-            showToast('Pulsa Play para reproducir');
+            showToast('Pulsa el vídeo para reproducir');
           }
-        }, 700);
+        }, 800);
       },
       onStateChange: event => {
         if (event.data === window.YT.PlayerState.ENDED) nextVideo();
@@ -197,7 +220,7 @@ async function mountPlayer(video) {
 function startProgressPolling() {
   stopProgressPolling();
   updateProgressBar();
-  progressTimer = setInterval(updateProgressBar, 350);
+  progressTimer = setInterval(updateProgressBar, 300);
 }
 
 function updateProgressBar() {
@@ -205,11 +228,9 @@ function updateProgressBar() {
   const slider = document.querySelector('.progress-slider');
   const time = document.querySelector('[data-progress-time]');
   if (!slider) return;
-
   const duration = Number(player.getDuration?.() || 0);
   const current = Number(player.getCurrentTime?.() || 0);
   if (!duration) return;
-
   slider.max = String(duration);
   slider.value = String(current);
   slider.style.setProperty('--progress', `${Math.min(100, (current / duration) * 100)}%`);
@@ -220,9 +241,10 @@ function seekToSliderValue(value) {
   if (!playerReady || !player) return;
   const seconds = Number(value || 0);
   player.seekTo(seconds, true);
-  const slider = document.querySelector('.progress-slider');
-  const duration = Number(slider?.max || player.getDuration?.() || 0);
-  if (slider && duration) slider.style.setProperty('--progress', `${Math.min(100, (seconds / duration) * 100)}%`);
+  player.playVideo();
+  state.paused = false;
+  updatePlaybackControls();
+  updateProgressBar();
 }
 
 function nextVideo() {
@@ -243,6 +265,38 @@ function prevVideo() {
   renderFeed();
 }
 
+function chooseTopic(topicKey) {
+  if (!topicByKey(topicKey)) return;
+  state.activeTopic = topicKey;
+  state.activeSearch = '';
+  state.index = 0;
+  state.showInfo = false;
+  persistState();
+  if (state.screen === 'intro') state.screen = 'feed';
+  render();
+}
+
+function runSearch(rawTerm) {
+  const term = String(rawTerm || '').trim();
+  if (!term) {
+    chooseTopic(state.activeTopic || allTopics[0]?.key);
+    return;
+  }
+
+  const normalized = normalize(term);
+  const matchingTopic = allTopics.find(topic => normalize(topic.label).includes(normalized) || normalize(topic.key).includes(normalized));
+  if (matchingTopic) {
+    chooseTopic(matchingTopic.key);
+    return;
+  }
+
+  state.activeSearch = term;
+  state.index = 0;
+  state.screen = 'feed';
+  state.showInfo = false;
+  renderFeed();
+}
+
 function feedbackText(video) {
   const item = state.feedback[video.id];
   if (!item) return 'Sin feedback';
@@ -252,33 +306,45 @@ function feedbackText(video) {
   return labels[item.vote] || 'Guardado';
 }
 
+function topicChips(className = '') {
+  return allTopics.map(topic => {
+    const count = allVideos.filter(video => video.topicKey === topic.key).length;
+    const active = !state.activeSearch && topic.key === state.activeTopic ? 'active' : '';
+    return `<button class="topic-chip ${active} ${className}" data-topic="${topic.key}"><span>${topic.label}</span><small>${count}</small></button>`;
+  }).join('');
+}
+
 function renderIntro() {
   destroyPlayer();
-  const totalTopics = topics().length - 1;
+  const totalVideos = allVideos.length;
   app.innerHTML = `
     <section class="landing-screen">
       <div class="landing-bg"></div>
       <header class="landing-header">
         <div class="loop-wordmark"><span class="loop-logo">∞</span><strong>LOOP</strong></div>
-        <span class="landing-pill">MVP visual</span>
+        <button class="install-pill" data-action="install" hidden>Instalar</button>
       </header>
 
-      <section class="landing-main">
+      <section class="landing-main compact">
         <div class="landing-copy">
           <p class="mini-label">Microlearning shorts</p>
-          <h1>Scroll menos vacío. Aprende más.</h1>
-          <p>Vídeos educativos cortos, filtrados por tema, con una experiencia simple tipo Shorts.</p>
+          <h1>Aprende deslizando.</h1>
+          <p>Elige un tema o busca una categoría. LOOP convierte shorts educativos en una experiencia de aprendizaje rápida.</p>
+          <form class="search intro-search" data-search-form>
+            <input id="intro-search" name="q" placeholder="Buscar: astronomy, biology, cooking..." autocomplete="off" />
+            <button type="submit">🔍</button>
+          </form>
           <div class="landing-actions">
             <button class="main-cta" data-action="start">Empezar</button>
-            <button class="secondary-cta" data-action="demo">Demo directa</button>
+            <button class="secondary-cta" data-topic="${state.activeTopic}">${topicLabel(state.activeTopic)}</button>
           </div>
         </div>
 
-        <button class="preview-phone" data-action="demo" aria-label="Abrir demo LOOP">
+        <button class="preview-phone" data-action="start" aria-label="Abrir LOOP">
           <div class="preview-video"></div>
           <div class="preview-overlay">
-            <span>Science · 34s</span>
-            <strong>5 incredible facts about space</strong>
+            <span>${allTopics.length} categorías · ${totalVideos} vídeos</span>
+            <strong>${topicLabel(state.activeTopic)}</strong>
             <small>Swipe up to learn</small>
           </div>
           <div class="preview-rail"><i></i><i></i><i></i></div>
@@ -286,34 +352,37 @@ function renderIntro() {
       </section>
 
       <section class="landing-topics" aria-label="Seleccionar tema">
-        <div class="section-title">
-          <span>Temas</span>
-          <strong>${videos.length} vídeos · ${totalTopics} categorías</strong>
-        </div>
-        <div class="topic-strip large">
-          ${topics().map(topic => topicButton(topic)).join('')}
-        </div>
+        <div class="section-title"><span>Categorías iniciales</span><strong>${totalVideos} vídeos CSV</strong></div>
+        <div class="topic-strip large">${topicChips()}</div>
       </section>
     </section>`;
-}
-
-function topicButton(topic) {
-  const count = topic === 'Todo' ? videos.length : videos.filter(video => video.topic === topic).length;
-  const active = topic === state.activeTopic ? 'active' : '';
-  return `<button class="topic-chip ${active}" data-topic="${topic}"><span>${topic}</span><small>${count}</small></button>`;
+  updateInstallButton();
 }
 
 function renderFeed() {
+  const list = filteredVideos();
   const video = currentVideo();
 
   if (!video) {
     destroyPlayer();
-    app.innerHTML = `<section class="empty-screen"><h1>No hay vídeos para este tema.</h1><button class="main-cta" data-action="back">Volver</button></section>`;
+    app.innerHTML = `
+      <section class="empty-screen">
+        <div>
+          <h1>No hay resultados.</h1>
+          <p>Prueba con astronomy, biology, physics, cooking o coffee.</p>
+          <form class="search empty-search" data-search-form>
+            <input name="q" placeholder="Buscar categoría o texto" autocomplete="off" />
+            <button type="submit">🔍</button>
+          </form>
+          <button class="main-cta" data-action="back">Volver</button>
+        </div>
+      </section>`;
     return;
   }
 
   destroyPlayer();
   const feedback = feedbackText(video);
+  const feedTitle = state.activeSearch ? `Búsqueda: ${state.activeSearch}` : topicLabel(state.activeTopic);
 
   app.innerHTML = `
     <section class="shorts-screen">
@@ -323,9 +392,17 @@ function renderFeed() {
         <div class="shade top-shade"></div>
         <div class="shade bottom-shade"></div>
 
-        <header class="short-topbar">
-          <button class="glass-icon" data-action="back" aria-label="Volver">‹</button>
-          <button class="loop-mini" data-action="home" aria-label="LOOP inicio"><span class="loop-logo small">∞</span><strong>LOOP</strong></button>
+        <header class="feed-header">
+          <div class="feed-topline">
+            <button class="glass-icon" data-action="back" aria-label="Volver">‹</button>
+            <button class="loop-mini" data-action="home" aria-label="LOOP inicio"><span class="loop-logo small">∞</span><strong>LOOP</strong></button>
+            <span class="feed-count">${state.index + 1}/${list.length}</span>
+          </div>
+          <form class="search header-search" data-search-form>
+            <input name="q" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar categoría o vídeo" autocomplete="off" />
+            <button type="submit">🔍</button>
+          </form>
+          <nav class="top-topic-bar" aria-label="Categorías">${topicChips()}</nav>
         </header>
 
         <button class="center-play-zone" data-action="toggle-play" aria-label="Pausar o reproducir vídeo"></button>
@@ -345,14 +422,14 @@ function renderFeed() {
 
         <section class="short-copy ${state.hideCopy ? 'is-hidden' : ''}">
           <div class="video-meta-line">
-            <span class="topic-dot">${video.topic}</span>
+            <span class="topic-dot">${escapeHtml(feedTitle)}</span>
             <span>${durationSeconds(video.duration)}</span>
             <span>${formatViews(video.views)} views</span>
           </div>
-          <h1>${video.title}</h1>
-          <p>${video.summary}</p>
+          <h1>${escapeHtml(video.title)}</h1>
+          <p>${escapeHtml(video.summary || video.title)}</p>
           <div class="source-line">
-            <span>@${video.channel || 'Unknown'}</span>
+            <span>@${escapeHtml(video.channel || 'YouTube Shorts')}</span>
             <span data-feedback-line>${feedback}</span>
           </div>
         </section>
@@ -362,16 +439,12 @@ function renderFeed() {
           <span data-progress-time>0:00 / 0:00</span>
         </div>
 
-        <nav class="bottom-topic-bar" aria-label="Cambiar tema">
-          ${topics().map(topic => topicButton(topic)).join('')}
-        </nav>
-
         <section class="info-sheet ${state.showInfo ? 'open' : ''}" aria-hidden="${state.showInfo ? 'false' : 'true'}">
           <button class="sheet-close" data-action="close-info" aria-label="Cerrar información">×</button>
           <button class="sheet-handle" data-action="close-info" aria-label="Cerrar información"></button>
           <p class="mini-label">Filtro LOOP</p>
           <h2>Por qué aparece</h2>
-          <p>${video.reason}</p>
+          <p>${escapeHtml(video.reason)}</p>
           <div class="score-row">
             <span>Calidad <strong>${video.quality}</strong></span>
             <span>Utilidad <strong>${video.usefulness}</strong></span>
@@ -389,7 +462,7 @@ function render() {
 }
 
 function showToast(message) {
-  const card = document.querySelector('.short-card');
+  const card = document.querySelector('.short-card') || document.querySelector('.landing-screen');
   if (!card) return;
   clearTimeout(toastTimer);
   document.querySelector('.toast')?.remove();
@@ -404,7 +477,6 @@ function updatePlaybackControls() {
   const muteIcon = document.querySelector('[data-mute-icon]');
   const muteLabel = document.querySelector('[data-mute-label]');
   const pausedIndicator = document.querySelector('.paused-indicator');
-
   if (muteIcon) muteIcon.textContent = state.muted ? '🔇' : '🔊';
   if (muteLabel) muteLabel.textContent = state.muted ? 'Sonido' : 'Mute';
   if (pausedIndicator) pausedIndicator.classList.toggle('visible', state.paused);
@@ -461,9 +533,8 @@ function toggleMute() {
     return;
   }
   state.muted = !state.muted;
-  if (state.muted) {
-    player.mute();
-  } else {
+  if (state.muted) player.mute();
+  else {
     player.unMute();
     player.setVolume(100);
     player.playVideo();
@@ -482,6 +553,22 @@ function openComment() {
   setTimeout(() => commentInput.focus(), 50);
 }
 
+function escapeHtml(value = '') {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function updateInstallButton() {
+  const button = document.querySelector('[data-action="install"]');
+  if (!button) return;
+  const installed = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  button.hidden = installed || !deferredInstallPrompt;
+}
+
 saveCommentBtn.addEventListener('click', event => {
   event.preventDefault();
   const video = currentVideo();
@@ -494,22 +581,31 @@ saveCommentBtn.addEventListener('click', event => {
   showToast('Comentario guardado');
 });
 
-app.addEventListener('click', event => {
+app.addEventListener('submit', event => {
+  const form = event.target.closest('[data-search-form]');
+  if (!form) return;
+  event.preventDefault();
+  const input = form.querySelector('input[name="q"]');
+  runSearch(input?.value || '');
+});
+
+app.addEventListener('click', async event => {
   const topic = event.target.closest('[data-topic]')?.dataset.topic;
   const action = event.target.closest('[data-action]')?.dataset.action;
 
   if (topic) {
-    state.activeTopic = topic;
-    state.index = 0;
-    state.screen = 'feed';
-    state.showInfo = false;
-    persistState();
-    renderFeed();
+    chooseTopic(topic);
     return;
   }
-
   if (!action) return;
-  if (action === 'start' || action === 'demo') { state.screen = 'feed'; clampIndex(); persistState(); renderFeed(); }
+
+  if (action === 'start') {
+    state.screen = 'feed';
+    state.activeSearch = '';
+    clampIndex();
+    persistState();
+    renderFeed();
+  }
   if (action === 'back' || action === 'home') { state.screen = 'intro'; state.showInfo = false; renderIntro(); }
   if (action === 'more') setVote('more');
   if (action === 'less') setVote('less');
@@ -519,6 +615,12 @@ app.addEventListener('click', event => {
   if (action === 'toggle-play') togglePlay();
   if (action === 'toggle-mute') toggleMute();
   if (action === 'toggle-copy') { state.hideCopy = !state.hideCopy; updateCopyVisibility(); }
+  if (action === 'install' && deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice.catch(() => null);
+    deferredInstallPrompt = null;
+    updateInstallButton();
+  }
 });
 
 app.addEventListener('input', event => {
@@ -528,7 +630,8 @@ app.addEventListener('input', event => {
   const duration = Number(slider.max || 0);
   const value = Number(slider.value || 0);
   if (duration) slider.style.setProperty('--progress', `${Math.min(100, (value / duration) * 100)}%`);
-  document.querySelector('[data-progress-time]') && (document.querySelector('[data-progress-time]').textContent = `${formatClock(value)} / ${formatClock(duration)}`);
+  const time = document.querySelector('[data-progress-time]');
+  if (time) time.textContent = `${formatClock(value)} / ${formatClock(duration)}`;
 });
 
 app.addEventListener('change', event => {
@@ -551,7 +654,7 @@ app.addEventListener('pointerup', event => {
 app.addEventListener('touchstart', event => {
   touchStartY = event.touches[0].clientY;
   touchStartX = event.touches[0].clientX;
-  touchStartedOnControl = Boolean(event.target.closest('button, input, textarea, .topic-chip, .info-sheet, .action-rail, .bottom-topic-bar, .progress-shell'));
+  touchStartedOnControl = Boolean(event.target.closest('button, input, textarea, .topic-chip, .info-sheet, .action-rail, .top-topic-bar, .progress-shell, .feed-header'));
 }, { passive: true });
 
 app.addEventListener('touchend', event => {
@@ -561,7 +664,6 @@ app.addEventListener('touchend', event => {
     touchStartedOnControl = false;
     return;
   }
-
   const dy = event.changedTouches[0].clientY - touchStartY;
   const dx = event.changedTouches[0].clientX - touchStartX;
   if (Math.abs(dy) > 70 && Math.abs(dy) > Math.abs(dx) * 1.25) dy < 0 ? nextVideo() : prevVideo();
@@ -571,7 +673,7 @@ app.addEventListener('touchend', event => {
 }, { passive: true });
 
 app.addEventListener('wheel', event => {
-  if (state.screen !== 'feed' || wheelLock || event.target.closest('.progress-shell, .info-sheet')) return;
+  if (state.screen !== 'feed' || wheelLock || event.target.closest('.progress-shell, .info-sheet, .feed-header')) return;
   if (Math.abs(event.deltaY) < 45) return;
   wheelLock = true;
   event.deltaY > 0 ? nextVideo() : prevVideo();
