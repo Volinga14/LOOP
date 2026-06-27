@@ -17,20 +17,6 @@ Versión actualizada mezclando lo mejor de la versión antigua CSV con la UI tip
 
 ## Probar localmente
 
-Para probar la busqueda real en YouTube y guardar los videos vistos en `src/discovered-data.js`:
-
-```bash
-node server.mjs
-```
-
-Abrir:
-
-```text
-http://localhost:8000
-```
-
-La app tambien puede servirse de forma estatica, pero en ese modo la busqueda de YouTube no puede leer `youtube.com/results` por restricciones CORS del navegador:
-
 ```bash
 python -m http.server 8000
 ```
@@ -41,6 +27,8 @@ Abrir:
 http://localhost:8000
 ```
 
+En GitHub Pages funciona como app estatica. La busqueda escrita usa el catalogo incluido en la app y, si no hay resultados locales, muestra un enlace directo a la URL de busqueda de YouTube. Para activar busqueda real con YouTube Data API desde el navegador, poner una API key restringida al dominio en `src/config.js`.
+
 ## Estructura
 
 - `index.html`: shell principal y metadatos PWA.
@@ -48,6 +36,6 @@ http://localhost:8000
 - `src/app.js`: lógica de búsqueda, categorías, aleatorización, swipe y reproductor.
 - `src/data.js`: base inicial generada desde los CSV.
 - `src/discovered-data.js`: catalogo incremental de categorias y videos vistos.
-- `server.mjs`: servidor local para leer resultados de YouTube y persistir videos vistos.
+- `src/config.js`: configuracion opcional para YouTube Data API.
 - `data1/*.csv`: CSV originales.
 - `manifest.webmanifest`, `service-worker.js`, `icons/`: instalación PWA.

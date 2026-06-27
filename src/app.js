@@ -13,6 +13,7 @@ const LAST_STATE_KEY = 'loopLastState.v3';
 const VIEWED_CATALOG_KEY = 'loopViewedCatalog.v1';
 const PLAYER_ID = 'yt-player';
 const YOUTUBE_SHORTS_FILTER = 'EgIQCQ%3D%3D';
+const youtubeApiKey = String(window.LOOP_CONFIG?.youtubeApiKey || window.LOOP_YOUTUBE_API_KEY || '').trim();
 
 let player = null;
 let playerReady = false;
@@ -24,7 +25,6 @@ let wheelLock = false;
 let deferredInstallPrompt = null;
 let ignoreNextCenterClick = false;
 let searchRequestCounter = 0;
-const recordedThisSession = new Set();
 
 let touchStartY = null;
 let touchStartX = null;
@@ -131,19 +131,6 @@ function recordSeenVideo(video) {
   if (!video?.video_id) return;
   const topic = topicForVideo(video);
   saveViewedLocally(video, topic);
-
-  const key = `${video.video_id}:${video.sourceSearchUrl || video.topicKey || ''}`;
-  if (recordedThisSession.has(key)) return;
-  recordedThisSession.add(key);
-
-  fetch('/api/seen-video', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, video }),
-    keepalive: true
-  }).catch(error => {
-    console.info('LOOP: seen video stored locally only', error);
-  });
 }
 
 function normalize(value = '') {
@@ -448,7 +435,7 @@ function normalizeSearchVideo(video, term, searchUrl) {
     reason: video.reason || `Resultado de la busqueda en YouTube para "${term}".`,
     sourceSearchTerm: term,
     sourceSearchUrl: searchUrl,
-    source: 'youtube-results',
+    source: video.source || 'youtube-results',
     discoveredAt: video.discoveredAt || new Date().toISOString()
   };
 }
@@ -457,16 +444,88 @@ function addVideosToRuntimeCatalog(videos) {
   allVideos = mergeVideoLists(allVideos, videos);
 }
 
+function addRemoteVideosToRuntimeCatalog(videos) {
+  addVideosToRuntimeCatalog(videos.filter(video => video.source !== 'local-catalog'));
+}
+
+function searchTerms(term) {
+  return normalize(term).split(/\s+/).filter(Boolean);
+}
+
+function videoMatchesSearch(video, terms) {
+  if (!terms.length) return true;
+  const haystack = normalize([
+    video.title,
+    video.summary,
+    video.topic,
+    video.topicKey,
+    video.channel,
+    video.reason
+  ].join(' '));
+  return terms.every(term => haystack.includes(term));
+}
+
+function localSearchVideos(term, searchUrl) {
+  const terms = searchTerms(term);
+  const topic = searchTopicForTerm(term);
+  return allVideos
+    .filter(video => videoMatchesSearch(video, terms))
+    .slice(0, 60)
+    .map(video => normalizeSearchVideo({
+      ...video,
+      id: `${topic.key}-${video.video_id}`,
+      source: video.source || 'local-catalog',
+      sourceOriginalTopic: video.topic,
+      sourceOriginalTopicKey: video.topicKey
+    }, term, searchUrl));
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url.toString());
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
 async function fetchYouTubeSearch(term, searchUrl) {
-  const response = await fetch(`/api/youtube-search?url=${encodeURIComponent(searchUrl)}`);
-  if (!response.ok) {
-    throw new Error('No se pudo leer la busqueda de YouTube.');
-  }
-  const payload = await response.json();
-  const videos = Array.isArray(payload.videos) ? payload.videos : [];
-  return videos
-    .filter(video => video.video_id)
-    .map(video => normalizeSearchVideo(video, term, payload.searchUrl || searchUrl));
+  if (!youtubeApiKey) return localSearchVideos(term, searchUrl);
+
+  const searchEndpoint = new URL('https://www.googleapis.com/youtube/v3/search');
+  searchEndpoint.searchParams.set('part', 'snippet');
+  searchEndpoint.searchParams.set('type', 'video');
+  searchEndpoint.searchParams.set('videoEmbeddable', 'true');
+  searchEndpoint.searchParams.set('safeSearch', 'moderate');
+  searchEndpoint.searchParams.set('maxResults', '25');
+  searchEndpoint.searchParams.set('q', term);
+  searchEndpoint.searchParams.set('key', youtubeApiKey);
+
+  const searchPayload = await fetchJson(searchEndpoint);
+  const ids = (searchPayload.items || [])
+    .map(item => item.id?.videoId)
+    .filter(Boolean);
+
+  if (!ids.length) return [];
+
+  const videosEndpoint = new URL('https://www.googleapis.com/youtube/v3/videos');
+  videosEndpoint.searchParams.set('part', 'snippet,contentDetails,statistics');
+  videosEndpoint.searchParams.set('id', ids.join(','));
+  videosEndpoint.searchParams.set('key', youtubeApiKey);
+
+  const videosPayload = await fetchJson(videosEndpoint);
+  return (videosPayload.items || []).map(item => normalizeSearchVideo({
+    id: `youtube_${slugify(term)}-${item.id}`,
+    video_id: item.id,
+    title: item.snippet?.title || 'Video de YouTube',
+    url: `https://www.youtube.com/watch?v=${item.id}`,
+    views: item.statistics?.viewCount || '',
+    duration: item.contentDetails?.duration || '',
+    publishedAt: item.snippet?.publishedAt || '',
+    topic: term,
+    topicKey: `youtube_${slugify(term)}`,
+    channel: item.snippet?.channelTitle || 'YouTube',
+    summary: item.snippet?.description || item.snippet?.title || '',
+    reason: `Resultado de YouTube Data API para "${term}".`,
+    source: 'youtube-data-api'
+  }, term, searchUrl));
 }
 
 async function runSearch(rawTerm) {
@@ -496,13 +555,16 @@ async function runSearch(rawTerm) {
   try {
     const videos = await fetchYouTubeSearch(term, searchUrl);
     if (requestId !== searchRequestCounter) return;
-    addVideosToRuntimeCatalog(videos);
+    addRemoteVideosToRuntimeCatalog(videos);
     state.searchResults = videos;
-    state.searchError = videos.length ? '' : 'YouTube no devolvio videos para esta busqueda.';
+    state.searchError = videos.length ? '' : 'No hay resultados en LOOP todavia. Puedes abrir esta busqueda directamente en YouTube.';
   } catch (error) {
     if (requestId !== searchRequestCounter) return;
     console.warn('LOOP: YouTube search failed', error);
-    state.searchError = 'No se pudo consultar YouTube. Para esta funcion abre LOOP con: node server.mjs';
+    const fallbackVideos = localSearchVideos(term, searchUrl);
+    addRemoteVideosToRuntimeCatalog(fallbackVideos);
+    state.searchResults = fallbackVideos;
+    state.searchError = fallbackVideos.length ? '' : 'No hay resultados en LOOP todavia. Puedes abrir esta busqueda directamente en YouTube.';
   } finally {
     if (requestId !== searchRequestCounter) return;
     state.searchLoading = false;
@@ -563,7 +625,7 @@ function renderFeed() {
     app.innerHTML = `
       <section class="empty-screen">
         <div>
-          <h1>Buscando en YouTube...</h1>
+          <h1>Buscando...</h1>
           <p>${escapeHtml(state.activeSearchUrl || '')}</p>
           <button class="start" data-action="back">Volver</button>
         </div>
@@ -573,8 +635,11 @@ function renderFeed() {
 
   if (!video) {
     destroyPlayer();
-    const title = state.searchError ? 'No se pudo buscar en YouTube.' : 'No hay resultados.';
+    const title = state.searchError ? 'No hay resultados en LOOP todavía.' : 'No hay resultados.';
     const message = state.searchError || 'Prueba con otra busqueda o toca una categoria.';
+    const youtubeLink = state.activeSearchUrl
+      ? `<a class="start external-search" href="${escapeHtml(state.activeSearchUrl)}" target="_blank" rel="noopener">Abrir en YouTube</a>`
+      : '';
     app.innerHTML = `
       <section class="empty-screen">
         <div>
@@ -584,6 +649,7 @@ function renderFeed() {
             <input name="q" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar en YouTube" autocomplete="off" />
             <button type="submit">🔍</button>
           </form>
+          ${youtubeLink}
           <button class="start" data-action="back">Volver</button>
         </div>
       </section>`;

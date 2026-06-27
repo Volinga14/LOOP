@@ -117,6 +117,7 @@ button { cursor: pointer; color: inherit; }
 
 .start {
   margin-top: 22px;
+  display: inline-block;
   background: #fff;
   color: #000;
   border: none;
@@ -126,6 +127,7 @@ button { cursor: pointer; color: inherit; }
   cursor: pointer;
   font-size: 14px;
   box-shadow: 0 8px 22px rgba(0,0,0,.42);
+  text-decoration: none;
 }
 
 /* Feed */
