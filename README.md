@@ -17,6 +17,20 @@ Versión actualizada mezclando lo mejor de la versión antigua CSV con la UI tip
 
 ## Probar localmente
 
+Para probar la busqueda real en YouTube y guardar los videos vistos en `src/discovered-data.js`:
+
+```bash
+node server.mjs
+```
+
+Abrir:
+
+```text
+http://localhost:8000
+```
+
+La app tambien puede servirse de forma estatica, pero en ese modo la busqueda de YouTube no puede leer `youtube.com/results` por restricciones CORS del navegador:
+
 ```bash
 python -m http.server 8000
 ```
@@ -33,5 +47,7 @@ http://localhost:8000
 - `styles.css`: diseño responsive, intro y feed tipo Shorts.
 - `src/app.js`: lógica de búsqueda, categorías, aleatorización, swipe y reproductor.
 - `src/data.js`: base inicial generada desde los CSV.
+- `src/discovered-data.js`: catalogo incremental de categorias y videos vistos.
+- `server.mjs`: servidor local para leer resultados de YouTube y persistir videos vistos.
 - `data1/*.csv`: CSV originales.
 - `manifest.webmanifest`, `service-worker.js`, `icons/`: instalación PWA.

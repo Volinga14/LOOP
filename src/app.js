@@ -1,4 +1,5 @@
-const allVideos = window.LOOP_VIDEOS || [];
+const discoveredData = window.LOOP_DISCOVERED || { topics: [], videos: [] };
+let allVideos = mergeVideoLists(window.LOOP_VIDEOS || [], discoveredData.videos || []);
 const allTopics = window.LOOP_TOPICS || [];
 
 const app = document.querySelector('#app');
@@ -9,7 +10,9 @@ const saveCommentBtn = document.querySelector('#save-comment-btn');
 
 const STORAGE_KEY = 'loopFeedback.v3';
 const LAST_STATE_KEY = 'loopLastState.v3';
+const VIEWED_CATALOG_KEY = 'loopViewedCatalog.v1';
 const PLAYER_ID = 'yt-player';
+const YOUTUBE_SHORTS_FILTER = 'EgIQCQ%3D%3D';
 
 let player = null;
 let playerReady = false;
@@ -20,6 +23,8 @@ let toastTimer = null;
 let wheelLock = false;
 let deferredInstallPrompt = null;
 let ignoreNextCenterClick = false;
+let searchRequestCounter = 0;
+const recordedThisSession = new Set();
 
 let touchStartY = null;
 let touchStartX = null;
@@ -31,8 +36,12 @@ const state = {
   mode: 'random', // random | topic | search
   activeTopic: '',
   activeSearch: '',
+  activeSearchUrl: '',
   index: 0,
   playlist: [],
+  searchResults: [],
+  searchLoading: false,
+  searchError: '',
   showSearch: false,
   showInfo: false,
   hideCopy: false,
@@ -45,6 +54,7 @@ const lastState = readJson(LAST_STATE_KEY, {});
 if (lastState.mode) state.mode = lastState.mode;
 if (lastState.activeTopic) state.activeTopic = lastState.activeTopic;
 if (lastState.activeSearch) state.activeSearch = lastState.activeSearch;
+if (lastState.activeSearchUrl) state.activeSearchUrl = lastState.activeSearchUrl;
 if (Number.isInteger(lastState.index)) state.index = lastState.index;
 if (typeof lastState.muted === 'boolean') state.muted = lastState.muted;
 
@@ -64,11 +74,31 @@ function readJson(key, fallback) {
   catch { return fallback; }
 }
 
+function mergeVideoLists(...lists) {
+  const byId = new Map();
+  lists.flat().filter(Boolean).forEach(video => {
+    const key = video.video_id || video.id;
+    if (!key) return;
+    byId.set(key, { ...(byId.get(key) || {}), ...video });
+  });
+  return [...byId.values()];
+}
+
+function mergeTopicLists(...lists) {
+  const byKey = new Map();
+  lists.flat().filter(Boolean).forEach(topic => {
+    if (!topic.key) return;
+    byKey.set(topic.key, { ...(byKey.get(topic.key) || {}), ...topic });
+  });
+  return [...byKey.values()];
+}
+
 function persistState() {
   localStorage.setItem(LAST_STATE_KEY, JSON.stringify({
     mode: state.mode,
     activeTopic: state.activeTopic,
     activeSearch: state.activeSearch,
+    activeSearchUrl: state.activeSearchUrl,
     index: state.index,
     muted: state.muted
   }));
@@ -78,8 +108,67 @@ function saveFeedback() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.feedback));
 }
 
+function topicForVideo(video) {
+  if (video.sourceSearchTerm) return searchTopicForTerm(video.sourceSearchTerm);
+  const topic = topicByKey(video.topicKey);
+  if (topic) return topic;
+  return {
+    key: video.topicKey || 'uncategorized',
+    label: video.topic || 'Uncategorized',
+    file: 'discovered-data.js',
+    description: 'Videos vistos en LOOP.'
+  };
+}
+
+function saveViewedLocally(video, topic) {
+  const catalog = readJson(VIEWED_CATALOG_KEY, { topics: [], videos: [] });
+  catalog.topics = mergeTopicLists(catalog.topics || [], [topic]);
+  catalog.videos = mergeVideoLists(catalog.videos || [], [video]);
+  localStorage.setItem(VIEWED_CATALOG_KEY, JSON.stringify(catalog));
+}
+
+function recordSeenVideo(video) {
+  if (!video?.video_id) return;
+  const topic = topicForVideo(video);
+  saveViewedLocally(video, topic);
+
+  const key = `${video.video_id}:${video.sourceSearchUrl || video.topicKey || ''}`;
+  if (recordedThisSession.has(key)) return;
+  recordedThisSession.add(key);
+
+  fetch('/api/seen-video', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, video }),
+    keepalive: true
+  }).catch(error => {
+    console.info('LOOP: seen video stored locally only', error);
+  });
+}
+
 function normalize(value = '') {
   return String(value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function slugify(value = '') {
+  return normalize(value).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'youtube_search';
+}
+
+function buildYouTubeSearchUrl(term) {
+  const url = new URL('https://www.youtube.com/results');
+  url.searchParams.set('search_query', `"${term}"`);
+  url.searchParams.set('sp', YOUTUBE_SHORTS_FILTER);
+  return url.toString();
+}
+
+function searchTopicForTerm(term) {
+  const key = `youtube_${slugify(term)}`;
+  return {
+    key,
+    label: term,
+    file: 'discovered-data.js',
+    description: `Resultados vistos desde YouTube para "${term}".`
+  };
 }
 
 function escapeHtml(value = '') {
@@ -113,12 +202,12 @@ function sourcePool() {
     return allVideos.filter(video => video.topicKey === state.activeTopic);
   }
   if (state.mode === 'search' && state.activeSearch) {
-    const term = normalize(state.activeSearch);
+    if (state.searchResults.length) return state.searchResults;
+    const topicKey = searchTopicForTerm(state.activeSearch).key;
     return allVideos.filter(video =>
-      normalize(video.title).includes(term) ||
-      normalize(video.topic).includes(term) ||
-      normalize(video.topicKey).includes(term) ||
-      normalize(video.channel).includes(term)
+      video.sourceSearchUrl === state.activeSearchUrl ||
+      video.sourceSearchTerm === state.activeSearch ||
+      video.topicKey === topicKey
     );
   }
   return allVideos;
@@ -311,6 +400,10 @@ function chooseRandomAll() {
   state.mode = 'random';
   state.activeTopic = '';
   state.activeSearch = '';
+  state.activeSearchUrl = '';
+  state.searchResults = [];
+  state.searchError = '';
+  state.searchLoading = false;
   state.showSearch = false;
   state.showInfo = false;
   rebuildPlaylist();
@@ -324,6 +417,10 @@ function chooseTopic(topicKey) {
   state.mode = 'topic';
   state.activeTopic = topicKey;
   state.activeSearch = '';
+  state.activeSearchUrl = '';
+  state.searchResults = [];
+  state.searchError = '';
+  state.searchLoading = false;
   state.showSearch = false;
   state.showInfo = false;
   rebuildPlaylist();
@@ -332,27 +429,87 @@ function chooseTopic(topicKey) {
   renderFeed();
 }
 
-function runSearch(rawTerm) {
+function normalizeSearchVideo(video, term, searchUrl) {
+  const topic = searchTopicForTerm(term);
+  return {
+    id: video.id || `${topic.key}-${video.video_id}`,
+    video_id: video.video_id,
+    title: video.title || 'Video de YouTube',
+    url: video.url || `https://www.youtube.com/watch?v=${video.video_id}`,
+    views: video.views || '',
+    duration: video.duration || '',
+    publishedAt: video.publishedAt || '',
+    topic: topic.label,
+    topicKey: topic.key,
+    channel: video.channel || 'YouTube',
+    quality: video.quality || 72,
+    usefulness: video.usefulness || 72,
+    summary: video.summary || video.title || 'Resultado de YouTube',
+    reason: video.reason || `Resultado de la busqueda en YouTube para "${term}".`,
+    sourceSearchTerm: term,
+    sourceSearchUrl: searchUrl,
+    source: 'youtube-results',
+    discoveredAt: video.discoveredAt || new Date().toISOString()
+  };
+}
+
+function addVideosToRuntimeCatalog(videos) {
+  allVideos = mergeVideoLists(allVideos, videos);
+}
+
+async function fetchYouTubeSearch(term, searchUrl) {
+  const response = await fetch(`/api/youtube-search?url=${encodeURIComponent(searchUrl)}`);
+  if (!response.ok) {
+    throw new Error('No se pudo leer la busqueda de YouTube.');
+  }
+  const payload = await response.json();
+  const videos = Array.isArray(payload.videos) ? payload.videos : [];
+  return videos
+    .filter(video => video.video_id)
+    .map(video => normalizeSearchVideo(video, term, payload.searchUrl || searchUrl));
+}
+
+async function runSearch(rawTerm) {
   const term = String(rawTerm || '').trim();
   if (!term) {
     chooseRandomAll();
     return;
   }
-  const normalized = normalize(term);
-  const matchingTopic = allTopics.find(topic => normalize(topic.label).includes(normalized) || normalize(topic.key).includes(normalized));
-  if (matchingTopic) {
-    chooseTopic(matchingTopic.key);
-    return;
-  }
+  const requestId = ++searchRequestCounter;
+  const searchUrl = buildYouTubeSearchUrl(term);
+
   state.mode = 'search';
   state.activeSearch = term;
+  state.activeSearchUrl = searchUrl;
   state.activeTopic = '';
   state.showSearch = false;
   state.showInfo = false;
-  rebuildPlaylist();
+  state.searchResults = [];
+  state.searchError = '';
+  state.searchLoading = true;
+  state.playlist = [];
+  state.index = 0;
   state.screen = 'feed';
   persistState();
   renderFeed();
+
+  try {
+    const videos = await fetchYouTubeSearch(term, searchUrl);
+    if (requestId !== searchRequestCounter) return;
+    addVideosToRuntimeCatalog(videos);
+    state.searchResults = videos;
+    state.searchError = videos.length ? '' : 'YouTube no devolvio videos para esta busqueda.';
+  } catch (error) {
+    if (requestId !== searchRequestCounter) return;
+    console.warn('LOOP: YouTube search failed', error);
+    state.searchError = 'No se pudo consultar YouTube. Para esta funcion abre LOOP con: node server.mjs';
+  } finally {
+    if (requestId !== searchRequestCounter) return;
+    state.searchLoading = false;
+    rebuildPlaylist();
+    persistState();
+    renderFeed();
+  }
 }
 
 function feedbackText(video) {
@@ -401,15 +558,30 @@ function renderFeed() {
   const list = playlist();
   const video = currentVideo();
 
-  if (!video) {
+  if (state.searchLoading) {
     destroyPlayer();
     app.innerHTML = `
       <section class="empty-screen">
         <div>
-          <h1>No hay resultados.</h1>
-          <p>Prueba con astronomy, biology, physics, cooking o coffee.</p>
+          <h1>Buscando en YouTube...</h1>
+          <p>${escapeHtml(state.activeSearchUrl || '')}</p>
+          <button class="start" data-action="back">Volver</button>
+        </div>
+      </section>`;
+    return;
+  }
+
+  if (!video) {
+    destroyPlayer();
+    const title = state.searchError ? 'No se pudo buscar en YouTube.' : 'No hay resultados.';
+    const message = state.searchError || 'Prueba con otra busqueda o toca una categoria.';
+    app.innerHTML = `
+      <section class="empty-screen">
+        <div>
+          <h1>${escapeHtml(title)}</h1>
+          <p>${escapeHtml(message)}</p>
           <form class="search empty-search" data-search-form>
-            <input name="q" placeholder="Buscar categoría o texto" autocomplete="off" />
+            <input name="q" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar en YouTube" autocomplete="off" />
             <button type="submit">🔍</button>
           </form>
           <button class="start" data-action="back">Volver</button>
@@ -419,6 +591,7 @@ function renderFeed() {
   }
 
   destroyPlayer();
+  recordSeenVideo(video);
   const feedback = feedbackText(video);
 
   app.innerHTML = `

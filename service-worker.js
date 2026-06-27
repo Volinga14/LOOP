@@ -1,10 +1,11 @@
-const CACHE_NAME = 'loop-mvp-csv-v1';
+const CACHE_NAME = 'loop-mvp-csv-v2';
 const CORE_ASSETS = [
   './',
   './index.html',
   './styles.css',
   './src/app.js',
   './src/data.js',
+  './src/discovered-data.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.svg',
@@ -24,7 +25,9 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
-  if (new URL(request.url).origin !== self.location.origin) return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
   event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => {
     const copy = response.clone();
     caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
