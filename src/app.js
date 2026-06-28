@@ -41,6 +41,8 @@ const state = {
   playlist: [],
   searchResults: [],
   searchLoading: false,
+  searchLoadingMore: false,
+  activeSearchNextPage: '',
   searchError: '',
   showSearch: false,
   showInfo: false,
@@ -202,7 +204,7 @@ function sourcePool() {
 
 function rebuildPlaylist({ keepCurrent = false } = {}) {
   const current = keepCurrent ? currentVideo() : null;
-  let next = shuffle(sourcePool());
+  let next = state.mode === 'search' ? [...sourcePool()] : shuffle(sourcePool());
   if (current && next.some(video => video.id === current.id)) {
     next = [current, ...next.filter(video => video.id !== current.id)];
   }
@@ -370,6 +372,9 @@ function nextVideo() {
   if (!list.length) return;
   state.index = (state.index + 1) % list.length;
   state.showInfo = false;
+  if (state.mode === 'search' && state.activeSearchNextPage && list.length - state.index <= 5) {
+    loadMoreSearchResults();
+  }
   persistState();
   renderFeed();
 }
@@ -388,9 +393,11 @@ function chooseRandomAll() {
   state.activeTopic = '';
   state.activeSearch = '';
   state.activeSearchUrl = '';
+  state.activeSearchNextPage = '';
   state.searchResults = [];
   state.searchError = '';
   state.searchLoading = false;
+  state.searchLoadingMore = false;
   state.showSearch = false;
   state.showInfo = false;
   rebuildPlaylist();
@@ -405,9 +412,11 @@ function chooseTopic(topicKey) {
   state.activeTopic = topicKey;
   state.activeSearch = '';
   state.activeSearchUrl = '';
+  state.activeSearchNextPage = '';
   state.searchResults = [];
   state.searchError = '';
   state.searchLoading = false;
+  state.searchLoadingMore = false;
   state.showSearch = false;
   state.showInfo = false;
   rebuildPlaylist();
@@ -447,6 +456,17 @@ function addVideosToRuntimeCatalog(videos) {
 function addRemoteVideosToRuntimeCatalog(videos) {
   const remoteSources = new Set(['youtube-data-api', 'piped', 'invidious', 'youtube-results']);
   addVideosToRuntimeCatalog(videos.filter(video => remoteSources.has(video.source)));
+}
+
+function appendUniqueVideos(existing, incoming) {
+  const seen = new Set(existing.map(video => video.video_id || video.id));
+  const additions = incoming.filter(video => {
+    const key = video.video_id || video.id;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return [...existing, ...additions];
 }
 
 function videoIdFromUrl(url = '') {
@@ -579,43 +599,52 @@ async function fetchInvidiousSearch(instance, term, searchUrl) {
     .filter(Boolean);
 }
 
-async function fetchPipedSearch(instance, term, searchUrl) {
-  const endpoint = new URL('/search', instance);
+async function fetchPipedSearch(instance, term, searchUrl, nextPage = '') {
+  const endpoint = nextPage ? new URL('/nextpage/search', instance) : new URL('/search', instance);
   endpoint.searchParams.set('q', term);
   endpoint.searchParams.set('filter', 'videos');
+  if (nextPage) endpoint.searchParams.set('nextpage', nextPage);
   const payload = await fetchJson(endpoint);
   const items = Array.isArray(payload?.items) ? payload.items : Array.isArray(payload) ? payload : [];
-  return items
+  const videos = items
     .filter(item => item.type === 'stream' || item.url || item.videoId)
     .map(item => normalizePipedItem(item, term, searchUrl, 'piped'))
     .filter(Boolean);
+  return { videos, nextPage: payload?.nextpage || '' };
 }
 
-async function fetchPublicYouTubeSearch(term, searchUrl) {
+async function fetchPublicYouTubeSearch(term, searchUrl, nextPage = '') {
+  if (nextPage) {
+    try {
+      return await fetchPipedSearch('https://api.piped.private.coffee', term, searchUrl, nextPage);
+    } catch {
+      return { videos: [], nextPage: '' };
+    }
+  }
+
   const providers = [
-    () => fetchPipedSearch('https://pipedapi.kavin.rocks', term, searchUrl),
-    () => fetchPipedSearch('https://piped.video/api', term, searchUrl),
-    () => fetchInvidiousSearch('https://yewtu.be', term, searchUrl),
-    () => fetchInvidiousSearch('https://inv.nadeko.net', term, searchUrl),
-    () => fetchInvidiousSearch('https://invidious.fdn.fr', term, searchUrl)
+    () => fetchPipedSearch('https://api.piped.private.coffee', term, searchUrl),
+    async () => ({ videos: await fetchInvidiousSearch('https://yewtu.be', term, searchUrl), nextPage: '' }),
+    async () => ({ videos: await fetchInvidiousSearch('https://inv.nadeko.net', term, searchUrl), nextPage: '' }),
+    async () => ({ videos: await fetchInvidiousSearch('https://invidious.fdn.fr', term, searchUrl), nextPage: '' })
   ];
 
   try {
     return await Promise.any(providers.map(async provider => {
-      const videos = await provider();
-      if (videos.length) return videos.slice(0, 40);
+      const result = await provider();
+      if (result.videos.length) return { videos: result.videos.slice(0, 40), nextPage: result.nextPage || '' };
       throw new Error('empty provider result');
     }));
   } catch {
-    return [];
+    return { videos: [], nextPage: '' };
   }
 }
 
 async function fetchYouTubeSearch(term, searchUrl) {
-  const publicVideos = await fetchPublicYouTubeSearch(term, searchUrl);
-  if (publicVideos.length) return publicVideos;
+  const publicResult = await fetchPublicYouTubeSearch(term, searchUrl);
+  if (publicResult.videos.length) return publicResult;
 
-  if (!youtubeApiKey) return fallbackSearchVideos(term, searchUrl);
+  if (!youtubeApiKey) return { videos: fallbackSearchVideos(term, searchUrl), nextPage: '' };
 
   const searchEndpoint = new URL('https://www.googleapis.com/youtube/v3/search');
   searchEndpoint.searchParams.set('part', 'snippet');
@@ -631,7 +660,7 @@ async function fetchYouTubeSearch(term, searchUrl) {
     .map(item => item.id?.videoId)
     .filter(Boolean);
 
-  if (!ids.length) return fallbackSearchVideos(term, searchUrl);
+  if (!ids.length) return { videos: fallbackSearchVideos(term, searchUrl), nextPage: '' };
 
   const videosEndpoint = new URL('https://www.googleapis.com/youtube/v3/videos');
   videosEndpoint.searchParams.set('part', 'snippet,contentDetails,statistics');
@@ -654,7 +683,10 @@ async function fetchYouTubeSearch(term, searchUrl) {
     reason: `Resultado de YouTube Data API para "${term}".`,
     source: 'youtube-data-api'
   }, term, searchUrl));
-  return apiVideos.length ? apiVideos : fallbackSearchVideos(term, searchUrl);
+  return {
+    videos: apiVideos.length ? apiVideos : fallbackSearchVideos(term, searchUrl),
+    nextPage: ''
+  };
 }
 
 async function runSearch(rawTerm) {
@@ -675,6 +707,8 @@ async function runSearch(rawTerm) {
   state.searchResults = [];
   state.searchError = '';
   state.searchLoading = true;
+  state.searchLoadingMore = false;
+  state.activeSearchNextPage = '';
   state.playlist = [];
   state.index = 0;
   state.screen = 'feed';
@@ -682,17 +716,20 @@ async function runSearch(rawTerm) {
   renderFeed();
 
   try {
-    const videos = await fetchYouTubeSearch(term, searchUrl);
+    const result = await fetchYouTubeSearch(term, searchUrl);
     if (requestId !== searchRequestCounter) return;
+    const videos = result.videos || [];
     addRemoteVideosToRuntimeCatalog(videos);
     state.searchResults = videos;
+    state.activeSearchNextPage = result.nextPage || '';
     state.searchError = videos.length ? '' : 'No hay resultados en LOOP todavia. Puedes abrir esta busqueda directamente en YouTube.';
   } catch (error) {
     if (requestId !== searchRequestCounter) return;
     console.warn('LOOP: YouTube search failed', error);
-    const fallbackVideos = localSearchVideos(term, searchUrl);
+    const fallbackVideos = fallbackSearchVideos(term, searchUrl);
     addRemoteVideosToRuntimeCatalog(fallbackVideos);
     state.searchResults = fallbackVideos;
+    state.activeSearchNextPage = '';
     state.searchError = fallbackVideos.length ? '' : 'No hay resultados en LOOP todavia. Puedes abrir esta busqueda directamente en YouTube.';
   } finally {
     if (requestId !== searchRequestCounter) return;
@@ -700,6 +737,36 @@ async function runSearch(rawTerm) {
     rebuildPlaylist();
     persistState();
     renderFeed();
+  }
+}
+
+async function loadMoreSearchResults() {
+  if (state.mode !== 'search' || !state.activeSearch || !state.activeSearchNextPage || state.searchLoadingMore) return;
+  state.searchLoadingMore = true;
+  const nextPage = state.activeSearchNextPage;
+
+  try {
+    const result = await fetchPublicYouTubeSearch(state.activeSearch, state.activeSearchUrl, nextPage);
+    const videos = result.videos || [];
+    if (!videos.length) {
+      state.activeSearchNextPage = '';
+      return;
+    }
+
+    const previousLength = state.searchResults.length;
+    state.searchResults = appendUniqueVideos(state.searchResults, videos);
+    state.playlist = appendUniqueVideos(state.playlist, videos);
+    state.activeSearchNextPage = result.nextPage || '';
+    addRemoteVideosToRuntimeCatalog(videos);
+
+    if (state.searchResults.length > previousLength) {
+      const count = document.querySelector('.video-meta-line span:nth-child(2)');
+      if (count) count.textContent = `${state.index + 1}/${state.playlist.length}`;
+    }
+  } catch (error) {
+    console.warn('LOOP: could not load more search results', error);
+  } finally {
+    state.searchLoadingMore = false;
   }
 }
 

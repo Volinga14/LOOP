@@ -27,7 +27,7 @@ Abrir:
 http://localhost:8000
 ```
 
-En GitHub Pages funciona como app estatica. La busqueda escrita intenta leer resultados publicos de YouTube desde el navegador, usa el catalogo incluido como respaldo y, si no hay coincidencias exactas, carga una mezcla de videos de YouTube de LOOP para no dejar la pantalla vacia. Para activar busqueda oficial con YouTube Data API desde el navegador, poner una API key restringida al dominio en `src/config.js`.
+En GitHub Pages funciona como app estatica. La busqueda escrita lee resultados de YouTube mediante una API publica compatible con CORS, conserva el orden de la busqueda y va cargando mas resultados cuando el usuario avanza por el feed. Si esa API no responde, usa el catalogo incluido como respaldo.
 
 ## Estructura
 
