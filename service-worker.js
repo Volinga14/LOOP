@@ -1,4 +1,4 @@
-const CACHE_NAME = 'loop-mvp-csv-v3';
+const CACHE_NAME = 'loop-mvp-csv-v4';
 const CORE_ASSETS = [
   './',
   './index.html',

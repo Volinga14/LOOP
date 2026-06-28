@@ -445,7 +445,29 @@ function addVideosToRuntimeCatalog(videos) {
 }
 
 function addRemoteVideosToRuntimeCatalog(videos) {
-  addVideosToRuntimeCatalog(videos.filter(video => video.source !== 'local-catalog'));
+  const remoteSources = new Set(['youtube-data-api', 'piped', 'invidious', 'youtube-results']);
+  addVideosToRuntimeCatalog(videos.filter(video => remoteSources.has(video.source)));
+}
+
+function videoIdFromUrl(url = '') {
+  const match = String(url).match(/(?:watch\?v=|shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  return match?.[1] || '';
+}
+
+function isoDurationFromSeconds(value) {
+  const total = Math.max(0, Math.round(Number(value || 0)));
+  if (!total) return '';
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return `PT${hours ? `${hours}H` : ''}${minutes ? `${minutes}M` : ''}${seconds || (!hours && !minutes) ? `${seconds}S` : ''}`;
+}
+
+function parseDurationText(value = '') {
+  if (typeof value === 'number') return isoDurationFromSeconds(value);
+  const parts = String(value).split(':').map(part => Number(part.trim()));
+  if (!parts.length || parts.some(part => !Number.isFinite(part))) return '';
+  return isoDurationFromSeconds(parts.reduce((total, part) => total * 60 + part, 0));
 }
 
 function searchTerms(term) {
@@ -480,14 +502,120 @@ function localSearchVideos(term, searchUrl) {
     }, term, searchUrl));
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url.toString());
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
+function fallbackSearchVideos(term, searchUrl) {
+  const localVideos = localSearchVideos(term, searchUrl);
+  if (localVideos.length) return localVideos;
+
+  const topic = searchTopicForTerm(term);
+  return shuffle(allVideos).slice(0, 40).map(video => normalizeSearchVideo({
+    ...video,
+    id: `${topic.key}-${video.video_id}`,
+    source: 'loop-fallback',
+    reason: `No habia coincidencias exactas para "${term}" en el catalogo local. LOOP muestra videos de YouTube disponibles mientras puedes abrir la busqueda original.`
+  }, term, searchUrl));
+}
+
+async function fetchJson(url, { timeoutMs = 7000 } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url.toString(), { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeInvidiousItem(item, term, searchUrl, source) {
+  const videoId = item.videoId || videoIdFromUrl(item.url);
+  if (!videoId) return null;
+  return normalizeSearchVideo({
+    id: `${source}_${slugify(term)}-${videoId}`,
+    video_id: videoId,
+    title: item.title || 'Video de YouTube',
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    views: item.viewCount || item.views || '',
+    duration: isoDurationFromSeconds(item.lengthSeconds),
+    publishedAt: '',
+    topic: term,
+    topicKey: `youtube_${slugify(term)}`,
+    channel: item.author || item.authorName || 'YouTube',
+    summary: item.description || item.title || '',
+    reason: `Resultado publico de YouTube para "${term}".`,
+    source
+  }, term, searchUrl);
+}
+
+function normalizePipedItem(item, term, searchUrl, source) {
+  const videoId = item.videoId || videoIdFromUrl(item.url);
+  if (!videoId) return null;
+  return normalizeSearchVideo({
+    id: `${source}_${slugify(term)}-${videoId}`,
+    video_id: videoId,
+    title: item.title || 'Video de YouTube',
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    views: item.views || '',
+    duration: parseDurationText(item.duration),
+    publishedAt: '',
+    topic: term,
+    topicKey: `youtube_${slugify(term)}`,
+    channel: item.uploaderName || item.uploader || 'YouTube',
+    summary: item.shortDescription || item.description || item.title || '',
+    reason: `Resultado publico de YouTube para "${term}".`,
+    source
+  }, term, searchUrl);
+}
+
+async function fetchInvidiousSearch(instance, term, searchUrl) {
+  const endpoint = new URL('/api/v1/search', instance);
+  endpoint.searchParams.set('q', term);
+  endpoint.searchParams.set('type', 'video');
+  endpoint.searchParams.set('sort_by', 'relevance');
+  const payload = await fetchJson(endpoint);
+  return (Array.isArray(payload) ? payload : [])
+    .filter(item => item.type === 'video' || item.videoId)
+    .map(item => normalizeInvidiousItem(item, term, searchUrl, 'invidious'))
+    .filter(Boolean);
+}
+
+async function fetchPipedSearch(instance, term, searchUrl) {
+  const endpoint = new URL('/search', instance);
+  endpoint.searchParams.set('q', term);
+  endpoint.searchParams.set('filter', 'videos');
+  const payload = await fetchJson(endpoint);
+  const items = Array.isArray(payload?.items) ? payload.items : Array.isArray(payload) ? payload : [];
+  return items
+    .filter(item => item.type === 'stream' || item.url || item.videoId)
+    .map(item => normalizePipedItem(item, term, searchUrl, 'piped'))
+    .filter(Boolean);
+}
+
+async function fetchPublicYouTubeSearch(term, searchUrl) {
+  const providers = [
+    () => fetchPipedSearch('https://pipedapi.kavin.rocks', term, searchUrl),
+    () => fetchPipedSearch('https://piped.video/api', term, searchUrl),
+    () => fetchInvidiousSearch('https://yewtu.be', term, searchUrl),
+    () => fetchInvidiousSearch('https://inv.nadeko.net', term, searchUrl),
+    () => fetchInvidiousSearch('https://invidious.fdn.fr', term, searchUrl)
+  ];
+
+  try {
+    return await Promise.any(providers.map(async provider => {
+      const videos = await provider();
+      if (videos.length) return videos.slice(0, 40);
+      throw new Error('empty provider result');
+    }));
+  } catch {
+    return [];
+  }
 }
 
 async function fetchYouTubeSearch(term, searchUrl) {
-  if (!youtubeApiKey) return localSearchVideos(term, searchUrl);
+  const publicVideos = await fetchPublicYouTubeSearch(term, searchUrl);
+  if (publicVideos.length) return publicVideos;
+
+  if (!youtubeApiKey) return fallbackSearchVideos(term, searchUrl);
 
   const searchEndpoint = new URL('https://www.googleapis.com/youtube/v3/search');
   searchEndpoint.searchParams.set('part', 'snippet');
@@ -503,7 +631,7 @@ async function fetchYouTubeSearch(term, searchUrl) {
     .map(item => item.id?.videoId)
     .filter(Boolean);
 
-  if (!ids.length) return [];
+  if (!ids.length) return fallbackSearchVideos(term, searchUrl);
 
   const videosEndpoint = new URL('https://www.googleapis.com/youtube/v3/videos');
   videosEndpoint.searchParams.set('part', 'snippet,contentDetails,statistics');
@@ -511,7 +639,7 @@ async function fetchYouTubeSearch(term, searchUrl) {
   videosEndpoint.searchParams.set('key', youtubeApiKey);
 
   const videosPayload = await fetchJson(videosEndpoint);
-  return (videosPayload.items || []).map(item => normalizeSearchVideo({
+  const apiVideos = (videosPayload.items || []).map(item => normalizeSearchVideo({
     id: `youtube_${slugify(term)}-${item.id}`,
     video_id: item.id,
     title: item.snippet?.title || 'Video de YouTube',
@@ -526,6 +654,7 @@ async function fetchYouTubeSearch(term, searchUrl) {
     reason: `Resultado de YouTube Data API para "${term}".`,
     source: 'youtube-data-api'
   }, term, searchUrl));
+  return apiVideos.length ? apiVideos : fallbackSearchVideos(term, searchUrl);
 }
 
 async function runSearch(rawTerm) {
