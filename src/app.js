@@ -1,6 +1,7 @@
 const discoveredData = window.LOOP_DISCOVERED || { topics: [], videos: [] };
-let allVideos = mergeVideoLists(window.LOOP_VIDEOS || [], discoveredData.videos || []);
-const allTopics = window.LOOP_TOPICS || [];
+const viewedData = readJson('loopViewedCatalog.v1', { topics: [], videos: [] });
+let allVideos = mergeVideoLists(window.LOOP_VIDEOS || [], discoveredData.videos || [], viewedData.videos);
+let allTopics = mergeTopicLists(window.LOOP_TOPICS || [], discoveredData.topics || [], viewedData.topics);
 
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#comment-dialog');
@@ -8,7 +9,7 @@ const commentInput = document.querySelector('#comment-input');
 const commentTitle = document.querySelector('#comment-video-title');
 const saveCommentBtn = document.querySelector('#save-comment-btn');
 
-const STORAGE_KEY = 'loopFeedback.v3';
+const STORAGE_KEY = 'loopFeedback.v4';
 const LAST_STATE_KEY = 'loopLastState.v3';
 const VIEWED_CATALOG_KEY = 'loopViewedCatalog.v1';
 const PLAYER_ID = 'yt-player';
@@ -25,6 +26,9 @@ let wheelLock = false;
 let deferredInstallPrompt = null;
 let ignoreNextCenterClick = false;
 let searchRequestCounter = 0;
+let commentVideoId = null;
+let playerGeneration = 0;
+let storageWarningShown = false;
 
 let touchStartY = null;
 let touchStartX = null;
@@ -44,20 +48,20 @@ const state = {
   searchLoadingMore: false,
   activeSearchNextPage: '',
   searchError: '',
+  searchNotice: '',
   showSearch: false,
   showInfo: false,
   hideCopy: false,
   muted: false,
   paused: false,
-  feedback: readJson(STORAGE_KEY, {})
+  feedback: migrateFeedback(readJson(STORAGE_KEY, readJson('loopFeedback.v3', {})))
 };
 
 const lastState = readJson(LAST_STATE_KEY, {});
-if (lastState.mode) state.mode = lastState.mode;
-if (lastState.activeTopic) state.activeTopic = lastState.activeTopic;
-if (lastState.activeSearch) state.activeSearch = lastState.activeSearch;
-if (lastState.activeSearchUrl) state.activeSearchUrl = lastState.activeSearchUrl;
-if (Number.isInteger(lastState.index)) state.index = lastState.index;
+if (['random', 'topic', 'search'].includes(lastState.mode)) state.mode = lastState.mode;
+if (typeof lastState.activeTopic === 'string') state.activeTopic = lastState.activeTopic;
+if (typeof lastState.activeSearch === 'string') state.activeSearch = lastState.activeSearch;
+if (state.activeSearch) state.activeSearchUrl = buildYouTubeSearchUrl(state.activeSearch);
 if (typeof lastState.muted === 'boolean') state.muted = lastState.muted;
 
 if ('serviceWorker' in navigator) {
@@ -72,13 +76,41 @@ window.addEventListener('beforeinstallprompt', event => {
 });
 
 function readJson(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || 'null');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
+  }
   catch { return fallback; }
+}
+
+function writeJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (error) {
+    console.warn('LOOP: storage unavailable', error);
+    if (!storageWarningShown) {
+      storageWarningShown = true;
+      setTimeout(() => showToast('No se puede guardar en este dispositivo. Los cambios durarán esta sesión.'), 0);
+    }
+    return false;
+  }
+}
+
+function migrateFeedback(records) {
+  const migrated = Object.create(null);
+  Object.entries(records).sort((a, b) => String(a[1]?.at || '').localeCompare(String(b[1]?.at || ''))).forEach(([key, item]) => {
+    const videoId = key.match(/([a-zA-Z0-9_-]{11})$/)?.[1];
+    if (!videoId || !item || typeof item !== 'object') return;
+    migrated[videoId] = { ...(migrated[videoId] || {}),
+      ...(typeof item.comment === 'string' ? { comment: item.comment } : {}),
+      ...(['more', 'less'].includes(item.vote) ? { vote: item.vote } : {}),
+      ...(typeof item.at === 'string' ? { at: item.at } : {}) };
+  });
+  return migrated;
 }
 
 function mergeVideoLists(...lists) {
   const byId = new Map();
-  lists.flat().filter(Boolean).forEach(video => {
+  lists.filter(Array.isArray).flat().filter(video => video && typeof video.video_id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(video.video_id)).forEach(video => {
     const key = video.video_id || video.id;
     if (!key) return;
     byId.set(key, { ...(byId.get(key) || {}), ...video });
@@ -88,26 +120,26 @@ function mergeVideoLists(...lists) {
 
 function mergeTopicLists(...lists) {
   const byKey = new Map();
-  lists.flat().filter(Boolean).forEach(topic => {
-    if (!topic.key) return;
+  lists.filter(Array.isArray).flat().filter(Boolean).forEach(topic => {
+    if (typeof topic.key !== 'string' || typeof topic.label !== 'string') return;
     byKey.set(topic.key, { ...(byKey.get(topic.key) || {}), ...topic });
   });
   return [...byKey.values()];
 }
 
 function persistState() {
-  localStorage.setItem(LAST_STATE_KEY, JSON.stringify({
+  writeJson(LAST_STATE_KEY, {
     mode: state.mode,
     activeTopic: state.activeTopic,
     activeSearch: state.activeSearch,
     activeSearchUrl: state.activeSearchUrl,
     index: state.index,
     muted: state.muted
-  }));
+  });
 }
 
 function saveFeedback() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.feedback));
+  return writeJson(STORAGE_KEY, state.feedback);
 }
 
 function topicForVideo(video) {
@@ -126,7 +158,10 @@ function saveViewedLocally(video, topic) {
   const catalog = readJson(VIEWED_CATALOG_KEY, { topics: [], videos: [] });
   catalog.topics = mergeTopicLists(catalog.topics || [], [topic]);
   catalog.videos = mergeVideoLists(catalog.videos || [], [video]);
-  localStorage.setItem(VIEWED_CATALOG_KEY, JSON.stringify(catalog));
+  catalog.videos = catalog.videos.slice(-500);
+  const topicKeys = new Set(catalog.videos.map(item => item.topicKey));
+  catalog.topics = catalog.topics.filter(item => topicKeys.has(item.key));
+  writeJson(VIEWED_CATALOG_KEY, catalog);
 }
 
 function recordSeenVideo(video) {
@@ -191,13 +226,7 @@ function sourcePool() {
     return allVideos.filter(video => video.topicKey === state.activeTopic);
   }
   if (state.mode === 'search' && state.activeSearch) {
-    if (state.searchResults.length) return state.searchResults;
-    const topicKey = searchTopicForTerm(state.activeSearch).key;
-    return allVideos.filter(video =>
-      video.sourceSearchUrl === state.activeSearchUrl ||
-      video.sourceSearchTerm === state.activeSearch ||
-      video.topicKey === topicKey
-    );
+    return state.searchResults;
   }
   return allVideos;
 }
@@ -238,9 +267,18 @@ function formatViews(value) {
 }
 
 function durationSeconds(duration) {
-  const match = String(duration).match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
-  if (!match) return duration || '0s';
-  return `${Number(match[1] || 0) * 60 + Number(match[2] || 0)}s`;
+  const seconds = durationInSeconds(duration);
+  return seconds ? `${seconds}s` : 'Duración desconocida';
+}
+
+function durationInSeconds(duration) {
+  const match = String(duration || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  return match ? Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0) : 0;
+}
+
+function playableSearchVideos(videos) {
+  return (Array.isArray(videos) ? videos : []).filter(video => video &&
+    typeof video.video_id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(video.video_id) && durationInSeconds(video.duration) <= 180);
 }
 
 function formatClock(seconds = 0) {
@@ -251,17 +289,23 @@ function formatClock(seconds = 0) {
 function ensureYouTubeApi() {
   if (window.YT?.Player) return Promise.resolve();
   if (ytApiPromise) return ytApiPromise;
-  ytApiPromise = new Promise(resolve => {
+  ytApiPromise = new Promise((resolve, reject) => {
     const previousCallback = window.onYouTubeIframeAPIReady;
+    const script = document.createElement('script');
+    const cleanup = () => { clearTimeout(timeout); script.onerror = null; window.onYouTubeIframeAPIReady = previousCallback; };
+    const fail = () => { cleanup(); script.remove(); reject(new Error('YouTube API unavailable')); };
+    const timeout = setTimeout(fail, 10000);
     window.onYouTubeIframeAPIReady = () => {
-      if (typeof previousCallback === 'function') previousCallback();
+      cleanup();
+      try { if (typeof previousCallback === 'function') previousCallback(); }
+      catch (error) { console.warn('LOOP: previous YouTube callback failed', error); }
       resolve();
     };
-    const script = document.createElement('script');
+    script.onerror = fail;
     script.src = 'https://www.youtube.com/iframe_api';
     script.async = true;
     document.head.appendChild(script);
-  });
+  }).catch(error => { ytApiPromise = null; throw error; });
   return ytApiPromise;
 }
 
@@ -271,6 +315,7 @@ function stopProgressPolling() {
 }
 
 function destroyPlayer() {
+  playerGeneration += 1;
   stopProgressPolling();
   playerReady = false;
   if (player?.destroy) {
@@ -280,61 +325,85 @@ function destroyPlayer() {
 }
 
 async function mountPlayer(video) {
-  await ensureYouTubeApi();
-  const mountNode = document.getElementById(PLAYER_ID);
-  if (!mountNode || state.screen !== 'feed') return;
-  if (currentVideo()?.id !== video.id) return;
+  const generation = playerGeneration;
+  try {
+    await ensureYouTubeApi();
+    const mountNode = document.getElementById(PLAYER_ID);
+    if (!mountNode || state.screen !== 'feed') return;
+    if (generation !== playerGeneration || currentVideo()?.id !== video.id) return;
 
-  destroyPlayer();
-  player = new window.YT.Player(PLAYER_ID, {
-    videoId: video.video_id,
-    host: 'https://www.youtube-nocookie.com',
-    playerVars: {
-      autoplay: 1,
-      controls: 0,
-      disablekb: 1,
-      fs: 0,
-      iv_load_policy: 3,
-      modestbranding: 1,
-      playsinline: 1,
-      rel: 0
-    },
-    events: {
-      onReady: event => {
-        playerReady = true;
-        if (state.muted) event.target.mute();
-        else {
-          event.target.unMute();
-          event.target.setVolume(100);
-        }
-        event.target.playVideo();
-        state.paused = false;
-        updatePlaybackControls();
-        startProgressPolling();
-        setTimeout(() => {
-          if (!player?.getPlayerState) return;
-          const status = player.getPlayerState();
-          if (status !== window.YT.PlayerState.PLAYING) {
-            state.paused = true;
-            updatePlaybackControls();
-            showToast('Toca el vídeo para reproducir');
-          }
-        }, 850);
+    player = new window.YT.Player(PLAYER_ID, {
+      videoId: video.video_id,
+      host: 'https://www.youtube-nocookie.com',
+      playerVars: {
+        autoplay: 1,
+        controls: 0,
+        disablekb: 1,
+        fs: 0,
+        iv_load_policy: 3,
+        modestbranding: 1,
+        playsinline: 1,
+        rel: 0
       },
-      onStateChange: event => {
-        if (event.data === window.YT.PlayerState.ENDED) nextVideo();
-        if (event.data === window.YT.PlayerState.PLAYING) {
+      events: {
+        onReady: event => {
+          if (generation !== playerGeneration) return;
+          playerReady = true;
+          if (state.muted) event.target.mute();
+          else {
+            event.target.unMute();
+            event.target.setVolume(100);
+          }
+          event.target.playVideo();
           state.paused = false;
           updatePlaybackControls();
           startProgressPolling();
-        }
-        if (event.data === window.YT.PlayerState.PAUSED) {
+          setTimeout(() => {
+            if (generation !== playerGeneration || !player?.getPlayerState) return;
+            const status = player.getPlayerState();
+            if (status !== window.YT.PlayerState.PLAYING) {
+              state.paused = true;
+              updatePlaybackControls();
+              showToast('Toca el vídeo para reproducir');
+            }
+          }, 850);
+        },
+        onStateChange: event => {
+          if (generation !== playerGeneration) return;
+          if (event.data === window.YT.PlayerState.ENDED) nextVideo();
+          if (event.data === window.YT.PlayerState.PLAYING) {
+            state.paused = false;
+            updatePlaybackControls();
+            startProgressPolling();
+          }
+          if (event.data === window.YT.PlayerState.PAUSED) {
+            state.paused = true;
+            updatePlaybackControls();
+          }
+        },
+        onError: () => { if (generation === playerGeneration) showPlayerError('Este vídeo no se puede reproducir aquí. Puedes reintentar o pasar al siguiente.'); },
+        onAutoplayBlocked: () => {
+          if (generation !== playerGeneration) return;
           state.paused = true;
           updatePlaybackControls();
+          showToast('Toca el vídeo para reproducir');
         }
       }
-    }
-  });
+    });
+  } catch (error) {
+    if (generation === playerGeneration && state.screen === 'feed') showPlayerError('No se pudo cargar el reproductor. Comprueba la conexión y reintenta.');
+    console.warn('LOOP: player failed', error);
+  }
+}
+
+function showPlayerError(message) {
+  stopProgressPolling();
+  playerReady = false;
+  const errorPanel = document.querySelector('[data-player-error]');
+  if (!errorPanel) return;
+  errorPanel.hidden = false;
+  const copy = errorPanel.querySelector('[data-player-error-message]');
+  if (copy) copy.textContent = message;
 }
 
 function startProgressPolling() {
@@ -389,6 +458,7 @@ function prevVideo() {
 }
 
 function chooseRandomAll() {
+  invalidateSearchRequests();
   state.mode = 'random';
   state.activeTopic = '';
   state.activeSearch = '';
@@ -396,6 +466,7 @@ function chooseRandomAll() {
   state.activeSearchNextPage = '';
   state.searchResults = [];
   state.searchError = '';
+  state.searchNotice = '';
   state.searchLoading = false;
   state.searchLoadingMore = false;
   state.showSearch = false;
@@ -408,6 +479,7 @@ function chooseRandomAll() {
 
 function chooseTopic(topicKey) {
   if (!topicByKey(topicKey)) return;
+  invalidateSearchRequests();
   state.mode = 'topic';
   state.activeTopic = topicKey;
   state.activeSearch = '';
@@ -415,6 +487,7 @@ function chooseTopic(topicKey) {
   state.activeSearchNextPage = '';
   state.searchResults = [];
   state.searchError = '';
+  state.searchNotice = '';
   state.searchLoading = false;
   state.searchLoadingMore = false;
   state.showSearch = false;
@@ -444,6 +517,8 @@ function normalizeSearchVideo(video, term, searchUrl) {
     reason: video.reason || `Resultado de la busqueda en YouTube para "${term}".`,
     sourceSearchTerm: term,
     sourceSearchUrl: searchUrl,
+    sourceOriginalTopic: video.sourceOriginalTopic,
+    sourceOriginalTopicKey: video.sourceOriginalTopicKey,
     source: video.source || 'youtube-results',
     discoveredAt: video.discoveredAt || new Date().toISOString()
   };
@@ -523,16 +598,12 @@ function localSearchVideos(term, searchUrl) {
 }
 
 function fallbackSearchVideos(term, searchUrl) {
-  const localVideos = localSearchVideos(term, searchUrl);
-  if (localVideos.length) return localVideos;
-
-  const topic = searchTopicForTerm(term);
-  return shuffle(allVideos).slice(0, 40).map(video => normalizeSearchVideo({
-    ...video,
-    id: `${topic.key}-${video.video_id}`,
-    source: 'loop-fallback',
-    reason: `No habia coincidencias exactas para "${term}" en el catalogo local. LOOP muestra videos de YouTube disponibles mientras puedes abrir la busqueda original.`
-  }, term, searchUrl));
+  return localSearchVideos(term, searchUrl).map(video => ({ ...video,
+    topic: video.sourceOriginalTopic || video.topic,
+    topicKey: video.sourceOriginalTopicKey || video.topicKey,
+    source: 'local-catalog',
+    reason: `Coincidencia del catálogo local para "${term}". La búsqueda externa no devolvió resultados disponibles.`
+  }));
 }
 
 async function fetchJson(url, { timeoutMs = 7000 } = {}) {
@@ -632,7 +703,8 @@ async function fetchPublicYouTubeSearch(term, searchUrl, nextPage = '') {
   try {
     return await Promise.any(providers.map(async provider => {
       const result = await provider();
-      if (result.videos.length) return { videos: result.videos.slice(0, 40), nextPage: result.nextPage || '' };
+      const videos = playableSearchVideos(result.videos);
+      if (videos.length) return { videos: videos.slice(0, 40), nextPage: result.nextPage || '' };
       throw new Error('empty provider result');
     }));
   } catch {
@@ -690,7 +762,7 @@ async function fetchYouTubeSearch(term, searchUrl) {
 }
 
 async function runSearch(rawTerm) {
-  const term = String(rawTerm || '').trim();
+  const term = String(rawTerm || '').trim().slice(0, 200);
   if (!term) {
     chooseRandomAll();
     return;
@@ -706,6 +778,7 @@ async function runSearch(rawTerm) {
   state.showInfo = false;
   state.searchResults = [];
   state.searchError = '';
+  state.searchNotice = '';
   state.searchLoading = true;
   state.searchLoadingMore = false;
   state.activeSearchNextPage = '';
@@ -717,22 +790,24 @@ async function runSearch(rawTerm) {
 
   try {
     const result = await fetchYouTubeSearch(term, searchUrl);
-    if (requestId !== searchRequestCounter) return;
-    const videos = result.videos || [];
+    if (!isCurrentSearch(requestId, term)) return;
+    const videos = playableSearchVideos(result.videos);
     addRemoteVideosToRuntimeCatalog(videos);
     state.searchResults = videos;
+    state.searchNotice = videos.some(video => video.source === 'local-catalog') ? 'La búsqueda externa no devolvió resultados. Mostrando coincidencias del catálogo local.' : '';
     state.activeSearchNextPage = result.nextPage || '';
     state.searchError = videos.length ? '' : 'No hay resultados en LOOP todavia. Puedes abrir esta busqueda directamente en YouTube.';
   } catch (error) {
-    if (requestId !== searchRequestCounter) return;
+    if (!isCurrentSearch(requestId, term)) return;
     console.warn('LOOP: YouTube search failed', error);
     const fallbackVideos = fallbackSearchVideos(term, searchUrl);
     addRemoteVideosToRuntimeCatalog(fallbackVideos);
     state.searchResults = fallbackVideos;
+    state.searchNotice = fallbackVideos.length ? 'No se pudo completar la búsqueda externa. Mostrando coincidencias del catálogo local.' : '';
     state.activeSearchNextPage = '';
     state.searchError = fallbackVideos.length ? '' : 'No hay resultados en LOOP todavia. Puedes abrir esta busqueda directamente en YouTube.';
   } finally {
-    if (requestId !== searchRequestCounter) return;
+    if (!isCurrentSearch(requestId, term)) return;
     state.searchLoading = false;
     rebuildPlaylist();
     persistState();
@@ -740,14 +815,36 @@ async function runSearch(rawTerm) {
   }
 }
 
+function invalidateSearchRequests() {
+  searchRequestCounter += 1;
+  state.searchLoading = false;
+  state.searchLoadingMore = false;
+}
+
+function isCurrentSearch(requestId, term) {
+  return requestId === searchRequestCounter && state.screen === 'feed' && state.mode === 'search' && state.activeSearch === term;
+}
+
+function goHome() {
+  invalidateSearchRequests();
+  state.screen = 'intro';
+  state.showInfo = false;
+  state.showSearch = false;
+  renderIntro();
+}
+
 async function loadMoreSearchResults() {
   if (state.mode !== 'search' || !state.activeSearch || !state.activeSearchNextPage || state.searchLoadingMore) return;
   state.searchLoadingMore = true;
   const nextPage = state.activeSearchNextPage;
+  const requestId = searchRequestCounter;
+  const term = state.activeSearch;
+  const searchUrl = state.activeSearchUrl;
 
   try {
-    const result = await fetchPublicYouTubeSearch(state.activeSearch, state.activeSearchUrl, nextPage);
-    const videos = result.videos || [];
+    const result = await fetchPublicYouTubeSearch(term, searchUrl, nextPage);
+    if (!isCurrentSearch(requestId, term)) return;
+    const videos = playableSearchVideos(result.videos);
     if (!videos.length) {
       state.activeSearchNextPage = '';
       return;
@@ -766,12 +863,12 @@ async function loadMoreSearchResults() {
   } catch (error) {
     console.warn('LOOP: could not load more search results', error);
   } finally {
-    state.searchLoadingMore = false;
+    if (isCurrentSearch(requestId, term)) state.searchLoadingMore = false;
   }
 }
 
 function feedbackText(video) {
-  const item = state.feedback[video.id];
+  const item = state.feedback[video.video_id];
   if (!item) return 'Sin feedback';
   const labels = { more: 'Más contenido similar', less: 'Menos contenido similar' };
   if (item.comment && item.vote) return `${labels[item.vote] || item.vote} · Comentado`;
@@ -780,7 +877,7 @@ function feedbackText(video) {
 }
 
 function introCategoryButtons() {
-  return allTopics.map(topic => `<button class="category ${state.activeTopic === topic.key ? 'active' : ''}" data-topic="${topic.key}">${escapeHtml(topic.label)}</button>`).join('');
+  return allTopics.map(topic => `<button class="category ${state.activeTopic === topic.key ? 'active' : ''}" data-topic="${escapeHtml(topic.key)}">${escapeHtml(topic.label)}</button>`).join('');
 }
 
 function feedCategoryButtons() {
@@ -788,7 +885,7 @@ function feedCategoryButtons() {
   const allButton = `<button class="category ${allActive}" data-action="random-all">Todos</button>`;
   return allButton + allTopics.map(topic => {
     const active = state.mode === 'topic' && state.activeTopic === topic.key ? 'active' : '';
-    return `<button class="category ${active}" data-topic="${topic.key}">${escapeHtml(topic.label)}</button>`;
+    return `<button class="category ${active}" data-topic="${escapeHtml(topic.key)}">${escapeHtml(topic.label)}</button>`;
   }).join('');
 }
 
@@ -800,7 +897,7 @@ function renderIntro() {
       <p class="subtitle">Aprende deslizando</p>
 
       <form class="search search-intro" data-search-form>
-        <input id="introSearchInput" name="q" placeholder="Escribe o toca una categoría..." autocomplete="off" />
+        <input id="introSearchInput" name="q" aria-label="Buscar un tema" placeholder="Escribe o toca una categoría..." autocomplete="off" maxlength="200" />
         <button type="submit" aria-label="Buscar">🔍</button>
       </form>
 
@@ -813,6 +910,7 @@ function renderIntro() {
 }
 
 function renderFeed() {
+  if (state.screen !== 'feed') return;
   const list = playlist();
   const video = currentVideo();
 
@@ -821,7 +919,7 @@ function renderFeed() {
     app.innerHTML = `
       <section class="empty-screen">
         <div>
-          <h1>Buscando...</h1>
+          <h1 role="status">Buscando...</h1>
           <p>${escapeHtml(state.activeSearchUrl || '')}</p>
           <button class="start" data-action="back">Volver</button>
         </div>
@@ -842,8 +940,8 @@ function renderFeed() {
           <h1>${escapeHtml(title)}</h1>
           <p>${escapeHtml(message)}</p>
           <form class="search empty-search" data-search-form>
-            <input name="q" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar en YouTube" autocomplete="off" />
-            <button type="submit">🔍</button>
+            <input name="q" aria-label="Buscar un tema" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar en YouTube" autocomplete="off" maxlength="200" />
+            <button type="submit" aria-label="Buscar">🔍</button>
           </form>
           ${youtubeLink}
           <button class="start" data-action="back">Volver</button>
@@ -860,6 +958,11 @@ function renderFeed() {
     <section class="shorts-screen">
       <article class="short-card">
         <div id="${PLAYER_ID}" class="short-player"></div>
+        <div class="player-error" data-player-error role="alert" hidden>
+          <p data-player-error-message></p>
+          <button data-action="retry-player">Reintentar</button>
+          <button data-action="next-video">Siguiente vídeo</button>
+        </div>
 
         <div class="shade top-shade"></div>
         <div class="shade bottom-shade"></div>
@@ -869,9 +972,9 @@ function renderFeed() {
           <button class="search-corner" data-action="toggle-search" aria-label="Buscar">🔍</button>
         </header>
 
-        <section class="search-drawer ${state.showSearch ? 'open' : ''}" aria-hidden="${state.showSearch ? 'false' : 'true'}">
+        <section class="search-drawer ${state.showSearch ? 'open' : ''}" aria-hidden="${state.showSearch ? 'false' : 'true'}" ${state.showSearch ? '' : 'inert'}>
           <form class="search header-search" data-search-form>
-            <input name="q" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar categoría o vídeo" autocomplete="off" />
+            <input name="q" aria-label="Buscar un tema" value="${escapeHtml(state.activeSearch)}" placeholder="Buscar categoría o vídeo" autocomplete="off" maxlength="200" />
             <button type="submit" aria-label="Buscar">🔍</button>
           </form>
           <nav class="category-bar app-categories" aria-label="Categorías">
@@ -895,17 +998,18 @@ function renderFeed() {
         </button>
 
         <section class="short-copy ${state.hideCopy ? 'is-hidden' : ''}">
+          ${state.searchNotice ? `<p class="search-notice" role="status">${escapeHtml(state.searchNotice)}</p>` : ''}
           <div class="video-meta-line">
             <span class="topic-dot">${escapeHtml(feedTitle())}</span>
             <span>${state.index + 1}/${list.length}</span>
-            <span>${durationSeconds(video.duration)}</span>
+            <span>${escapeHtml(durationSeconds(video.duration))}</span>
             <span>${formatViews(video.views)} views</span>
           </div>
           <h1>${escapeHtml(video.title)}</h1>
           <p>${escapeHtml(video.summary || video.title)}</p>
           <div class="source-line">
             <span>@${escapeHtml(video.channel || 'YouTube Shorts')}</span>
-            <span data-feedback-line>${feedback}</span>
+            <span data-feedback-line>${escapeHtml(feedback)}</span>
           </div>
         </section>
 
@@ -914,15 +1018,15 @@ function renderFeed() {
           <span data-progress-time>0:00 / 0:00</span>
         </div>
 
-        <section class="info-sheet ${state.showInfo ? 'open' : ''}" aria-hidden="${state.showInfo ? 'false' : 'true'}">
+        <section class="info-sheet ${state.showInfo ? 'open' : ''}" aria-hidden="${state.showInfo ? 'false' : 'true'}" ${state.showInfo ? '' : 'inert'}>
           <button class="sheet-close" data-action="close-info" aria-label="Cerrar información">×</button>
           <button class="sheet-handle" data-action="close-info" aria-label="Cerrar información"></button>
           <p class="mini-label">Filtro LOOP</p>
           <h2>Por qué aparece</h2>
           <p>${escapeHtml(video.reason || 'Vídeo seleccionado de forma aleatoria desde la base inicial de LOOP. Más adelante se sustituirá por el algoritmo de recomendación.')}</p>
           <div class="score-row">
-            <span>Calidad <strong>${video.quality || '-'}</strong></span>
-            <span>Utilidad <strong>${video.usefulness || '-'}</strong></span>
+            <span>Calidad <strong>${escapeHtml(video.quality || '-')}</strong></span>
+            <span>Utilidad <strong>${escapeHtml(video.usefulness || '-')}</strong></span>
             <span>Origen <strong>${escapeHtml(video.topic || topicLabel(video.topicKey))}</strong></span>
           </div>
         </section>
@@ -943,6 +1047,7 @@ function showToast(message) {
   document.querySelector('.toast')?.remove();
   const toast = document.createElement('div');
   toast.className = 'toast';
+  toast.setAttribute('role', 'status');
   toast.textContent = message;
   card.appendChild(toast);
   toastTimer = setTimeout(() => toast.remove(), 1200);
@@ -962,6 +1067,9 @@ function updateInfoVisibility() {
   if (!sheet) return;
   sheet.classList.toggle('open', state.showInfo);
   sheet.setAttribute('aria-hidden', state.showInfo ? 'false' : 'true');
+  sheet.inert = !state.showInfo;
+  if (state.showInfo) sheet.querySelector('button')?.focus();
+  else document.querySelector('[data-action="toggle-info"]')?.focus();
 }
 
 function updateSearchVisibility() {
@@ -969,7 +1077,9 @@ function updateSearchVisibility() {
   if (!drawer) return;
   drawer.classList.toggle('open', state.showSearch);
   drawer.setAttribute('aria-hidden', state.showSearch ? 'false' : 'true');
+  drawer.inert = !state.showSearch;
   if (state.showSearch) setTimeout(() => drawer.querySelector('input')?.focus(), 40);
+  else document.querySelector('[data-action="toggle-search"]')?.focus();
 }
 
 function updateCopyVisibility() {
@@ -983,11 +1093,11 @@ function updateCopyVisibility() {
 function setVote(vote) {
   const video = currentVideo();
   if (!video) return;
-  state.feedback[video.id] = { ...(state.feedback[video.id] || {}), vote, at: new Date().toISOString() };
-  saveFeedback();
+  state.feedback[video.video_id] = { ...(state.feedback[video.video_id] || {}), vote, at: new Date().toISOString() };
+  const saved = saveFeedback();
   const line = document.querySelector('[data-feedback-line]');
   if (line) line.textContent = feedbackText(video);
-  showToast('Feedback guardado');
+  showToast(saved ? 'Feedback guardado' : 'Feedback disponible solo durante esta sesión');
 }
 
 function togglePlay() {
@@ -1031,22 +1141,25 @@ function openComment() {
   const video = currentVideo();
   if (!video) return;
   commentTitle.textContent = video.title;
-  commentInput.value = state.feedback[video.id]?.comment || '';
+  commentVideoId = video.video_id;
+  commentInput.value = state.feedback[commentVideoId]?.comment || '';
   dialog.showModal();
   setTimeout(() => commentInput.focus(), 50);
 }
 
 saveCommentBtn.addEventListener('click', event => {
   event.preventDefault();
+  if (!commentVideoId) return;
+  state.feedback[commentVideoId] = { ...(state.feedback[commentVideoId] || {}), comment: commentInput.value.trim(), at: new Date().toISOString() };
+  const saved = saveFeedback();
   const video = currentVideo();
-  if (!video) return;
-  state.feedback[video.id] = { ...(state.feedback[video.id] || {}), comment: commentInput.value.trim(), at: new Date().toISOString() };
-  saveFeedback();
+  const matchesCurrent = video?.video_id === commentVideoId;
   dialog.close();
   const line = document.querySelector('[data-feedback-line]');
-  if (line) line.textContent = feedbackText(video);
-  showToast('Comentario guardado');
+  if (line && matchesCurrent) line.textContent = feedbackText(video);
+  showToast(saved ? 'Comentario guardado' : 'Comentario disponible solo durante esta sesión');
 });
+dialog.addEventListener('close', () => { commentVideoId = null; });
 
 app.addEventListener('submit', event => {
   const form = event.target.closest('[data-search-form]');
@@ -1068,7 +1181,9 @@ app.addEventListener('click', async event => {
 
   if (action === 'start') chooseRandomAll();
   if (action === 'random-all') chooseRandomAll();
-  if (action === 'back' || action === 'home') { state.screen = 'intro'; state.showInfo = false; state.showSearch = false; renderIntro(); }
+  if (action === 'back' || action === 'home') goHome();
+  if (action === 'retry-player') renderFeed();
+  if (action === 'next-video') nextVideo();
   if (action === 'more') setVote('more');
   if (action === 'less') setVote('less');
   if (action === 'comment') openComment();
@@ -1182,7 +1297,9 @@ app.addEventListener('wheel', event => {
 }, { passive: true });
 
 document.addEventListener('keydown', event => {
-  if (state.screen !== 'feed') return;
+  if (state.screen !== 'feed' || dialog.open || event.target?.isContentEditable ||
+    ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(event.target?.tagName) || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp'].includes(event.key)) event.preventDefault();
   if (event.key === 'ArrowDown' || event.key === 'PageDown') nextVideo();
   if (event.key === 'ArrowUp' || event.key === 'PageUp') prevVideo();
   if (event.key === ' ') { event.preventDefault(); togglePlay(); }

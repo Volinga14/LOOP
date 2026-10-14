@@ -13,22 +13,22 @@
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="./icons/icon-192.svg" />
   <title>LOOP · Microaprendizaje</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./styles.css?v=8" />
 </head>
 <body>
   <main id="app" class="app-shell"></main>
 
-  <dialog id="comment-dialog" class="comment-dialog">
+  <dialog id="comment-dialog" class="comment-dialog" aria-labelledby="comment-heading">
     <form method="dialog">
       <div class="dialog-header">
         <div>
           <p class="mini-label">Feedback cualitativo</p>
-          <h2>Comentario sobre el vídeo</h2>
+          <h2 id="comment-heading">Comentario sobre el vídeo</h2>
         </div>
         <button class="icon-btn" value="cancel" aria-label="Cerrar">×</button>
       </div>
       <p id="comment-video-title" class="dialog-video-title"></p>
-      <textarea id="comment-input" rows="5" placeholder="Ej.: buen vídeo, pero demasiado básico; necesito más ejemplos prácticos..."></textarea>
+      <textarea id="comment-input" aria-label="Tu comentario sobre el vídeo" rows="5" maxlength="5000" placeholder="Ej.: buen vídeo, pero demasiado básico; necesito más ejemplos prácticos..."></textarea>
       <menu class="dialog-actions">
         <button class="secondary-cta" value="cancel">Cancelar</button>
         <button class="main-cta" id="save-comment-btn" value="default">Guardar</button>
@@ -36,9 +36,9 @@
     </form>
   </dialog>
 
-  <script src="./src/data.js?v=5"></script>
-  <script src="./src/discovered-data.js?v=5"></script>
-  <script src="./src/config.js?v=5"></script>
-  <script src="./src/app.js?v=5"></script>
+  <script src="./src/data.js?v=8"></script>
+  <script src="./src/discovered-data.js?v=8"></script>
+  <script src="./src/config.js?v=8"></script>
+  <script src="./src/app.js?v=8"></script>
 </body>
 </html>

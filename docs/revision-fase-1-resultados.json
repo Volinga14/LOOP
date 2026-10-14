@@ -1,0 +1,148 @@
+[
+  {
+    "name": "Syntax: src/app.js",
+    "observation": "OK"
+  },
+  {
+    "name": "Syntax: src/data.js",
+    "observation": "OK"
+  },
+  {
+    "name": "Syntax: src/discovered-data.js",
+    "observation": "OK"
+  },
+  {
+    "name": "Syntax: src/config.js",
+    "observation": "OK"
+  },
+  {
+    "name": "Syntax: service-worker.js",
+    "observation": "OK"
+  },
+  {
+    "name": "Syntax: server.mjs",
+    "observation": "OK"
+  },
+  {
+    "name": "Manifest JSON",
+    "observation": "OK"
+  },
+  {
+    "name": "Dataset",
+    "observation": {
+      "base": 604,
+      "discovered": 2,
+      "unique": 593,
+      "topics": 9,
+      "invalidIds": 0,
+      "missingTopics": 2,
+      "over180s": 0
+    }
+  },
+  {
+    "name": "Search without a match",
+    "observation": {
+      "exact": 0,
+      "fallback": 40
+    }
+  },
+  {
+    "name": "Category counts",
+    "observation": {
+      "astronomy": 66,
+      "biology": 37,
+      "physics": 53,
+      "social_sciences": 46,
+      "social_support": 62,
+      "subcultures": 60,
+      "cooking_recipes": 91,
+      "culinary_training": 87,
+      "non_alcoholic_drinks": 89
+    }
+  },
+  {
+    "name": "Feedback identity across searches",
+    "observation": {
+      "sameVideo": true,
+      "original": "Más contenido similar",
+      "search": "Sin feedback"
+    }
+  },
+  {
+    "name": "ArrowDown while editing a comment",
+    "observation": {
+      "before": 0,
+      "after": 1
+    }
+  },
+  {
+    "name": "Storage failure",
+    "observation": "QuotaExceededError"
+  },
+  {
+    "name": "Search completing after returning home",
+    "observation": {
+      "screen": "intro",
+      "resultsApplied": 1,
+      "feedRenders": 2
+    }
+  },
+  {
+    "name": "Pagination completing after category switch",
+    "observation": {
+      "mode": "topic",
+      "contaminated": true
+    }
+  },
+  {
+    "name": "Service worker API offline fallback",
+    "observation": [
+      "http://localhost/api/youtube-search?q=test",
+      "./index.html"
+    ]
+  },
+  {
+    "name": "HTML scripts missing from exact precache URLs",
+    "observation": [
+      "./src/data.js?v=5",
+      "./src/discovered-data.js?v=5",
+      "./src/config.js?v=5",
+      "./src/app.js?v=5"
+    ]
+  },
+  {
+    "name": "HTTP GET /",
+    "observation": {
+      "status": 200,
+      "type": "text/html; charset=utf-8"
+    }
+  },
+  {
+    "name": "HTTP GET /src/app.js",
+    "observation": {
+      "status": 200,
+      "type": "text/javascript; charset=utf-8"
+    }
+  },
+  {
+    "name": "HTTP GET /not-found.js",
+    "observation": {
+      "status": 200,
+      "type": "text/html; charset=utf-8"
+    }
+  },
+  {
+    "name": "HTTP GET /.git/HEAD",
+    "observation": {
+      "status": 200,
+      "type": "application/octet-stream"
+    }
+  },
+  {
+    "name": "HTTP GET /server.mjs",
+    "observation": {
+      "status": 200,
+      "type": "application/octet-stream"
+    }
+  }
+]

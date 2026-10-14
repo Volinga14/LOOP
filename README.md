@@ -17,8 +17,22 @@ Versión actualizada mezclando lo mejor de la versión antigua CSV con la UI tip
 
 ## Probar localmente
 
+Servidor local recomendado (requiere Node.js):
+
 ```bash
-python -m http.server 8000
+node server.mjs
+```
+
+Abrir `http://127.0.0.1:8000`. El servidor escucha únicamente en el equipo local por defecto y sirve una lista de archivos públicos. La escritura del catálogo por HTTP está desactivada; el cliente conserva feedback y vídeos vistos en el navegador. Para revisar regresiones:
+
+```bash
+node scripts/test-regressions.mjs
+```
+
+Alternativa para servir la aplicación estática:
+
+```bash
+python -m http.server 8000 --bind 127.0.0.1
 ```
 
 Abrir:
@@ -28,6 +42,10 @@ http://localhost:8000
 ```
 
 En GitHub Pages funciona como app estatica. La busqueda escrita lee resultados de YouTube mediante una API publica compatible con CORS, conserva el orden de la busqueda y va cargando mas resultados cuando el usuario avanza por el feed. Si esa API no responde, usa el catalogo incluido como respaldo.
+
+El respaldo solo ofrece coincidencias locales y avisa de su origen. Una búsqueda sin coincidencias muestra un estado vacío, sin sustituirla por vídeos aleatorios. El feedback se conserva por identificador de vídeo y se migra desde el formato anterior; todavía no cambia la recomendación. Sin acceso a almacenamiento, los cambios permanecen durante la sesión. La PWA puede abrir su interfaz offline; los vídeos y búsquedas externas requieren conexión.
+
+La revisión inicial está en `docs/revision-fase-1.md`. Las correcciones y pendientes actuales se documentan en `docs/correcciones-estabilizacion.md`.
 
 ## Estructura
 

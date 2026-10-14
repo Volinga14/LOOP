@@ -1,12 +1,14 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8000);
-const CATALOG_PATH = path.join(__dirname, 'src', 'discovered-data.js');
+const HOST = process.env.HOST || '127.0.0.1';
+const PUBLIC_FILES = new Set(['index.html', 'styles.css', 'service-worker.js', 'manifest.webmanifest',
+  'src/app.js', 'src/data.js', 'src/discovered-data.js', 'src/config.js',
+  'icons/icon.svg', 'icons/icon-192.svg', 'icons/icon-512.svg']);
 
 const MIME_TYPES = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -18,9 +20,9 @@ const MIME_TYPES = new Map([
   ['.csv', 'text/csv; charset=utf-8']
 ]);
 
-createServer(async (request, response) => {
+export const server = createServer(async (request, response) => {
   try {
-    const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+    const requestUrl = new URL(request.url, 'http://localhost');
 
     if (request.method === 'GET' && requestUrl.pathname === '/api/youtube-search') {
       await handleYouTubeSearch(requestUrl, response);
@@ -28,7 +30,8 @@ createServer(async (request, response) => {
     }
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/seen-video') {
-      await handleSeenVideo(request, response);
+      // The client persists locally. Never allow HTTP requests to rewrite source files.
+      sendJson(response, 410, { error: 'Catalog writes are disabled; use local browser storage.' });
       return;
     }
 
@@ -37,60 +40,49 @@ createServer(async (request, response) => {
       return;
     }
 
-    await serveStatic(requestUrl, response);
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      response.setHeader('allow', 'GET, HEAD');
+      sendText(response, 405, 'Method not allowed');
+      return;
+    }
+    await serveStatic(requestUrl, response, request.method === 'HEAD');
   } catch (error) {
     console.error('LOOP server error:', error);
-    sendJson(response, 500, { error: 'Internal server error' });
+    sendJson(response, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
   }
-}).listen(PORT, () => {
-  console.log(`LOOP listo en http://localhost:${PORT}`);
-  console.log('Busca en LOOP para leer resultados desde YouTube y guardar lo visto.');
 });
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  server.listen(PORT, HOST, () => console.log(`LOOP listo en http://${HOST}:${server.address().port}`));
+}
 
 async function handleYouTubeSearch(requestUrl, response) {
   const rawUrl = requestUrl.searchParams.get('url');
-  const searchUrl = rawUrl ? new URL(rawUrl) : buildSearchUrl(requestUrl.searchParams.get('q') || '');
+  let searchUrl;
+  try { searchUrl = rawUrl ? new URL(rawUrl) : buildSearchUrl(requestUrl.searchParams.get('q') || ''); }
+  catch { sendJson(response, 400, { error: 'Invalid search URL' }); return; }
 
-  if (searchUrl.hostname !== 'www.youtube.com' || searchUrl.pathname !== '/results') {
+  if (searchUrl.protocol !== 'https:' || searchUrl.hostname !== 'www.youtube.com' || searchUrl.pathname !== '/results' || searchUrl.port || searchUrl.username || searchUrl.password) {
     sendJson(response, 400, { error: 'Expected a YouTube results URL' });
     return;
   }
 
   const term = searchUrl.searchParams.get('search_query')?.replace(/^"|"$/g, '') || '';
-  const html = await fetchYouTubeHtml(searchUrl.toString());
-  const initialData = extractInitialData(html);
-  const videos = extractVideos(initialData, term, searchUrl.toString()).slice(0, 40);
-
-  sendJson(response, 200, {
-    searchUrl: searchUrl.toString(),
-    term,
-    videos
-  });
-}
-
-async function handleSeenVideo(request, response) {
-  const body = await readBody(request);
-  const payload = JSON.parse(body || '{}');
-  if (!payload.video?.video_id) {
-    sendJson(response, 400, { error: 'Missing video.video_id' });
-    return;
+  if (!term.trim() || term.length > 200) { sendJson(response, 400, { error: 'Search term must contain 1–200 characters' }); return; }
+  try {
+    const html = await fetchYouTubeHtml(searchUrl.toString());
+    const initialData = extractInitialData(html);
+    const videos = extractVideos(initialData, term, searchUrl.toString()).slice(0, 40);
+    sendJson(response, 200, { searchUrl: searchUrl.toString(), term, videos });
+  } catch {
+    sendJson(response, 502, { error: 'YouTube search is temporarily unavailable' });
   }
-
-  const topic = payload.topic || topicFromVideo(payload.video);
-  const catalog = await readCatalog();
-  catalog.topics = mergeByKey(catalog.topics || [], [topic], 'key');
-  catalog.videos = mergeByKey(catalog.videos || [], [payload.video], 'video_id');
-  await writeCatalog(catalog);
-
-  sendJson(response, 200, {
-    ok: true,
-    topics: catalog.topics.length,
-    videos: catalog.videos.length
-  });
 }
 
 async function fetchYouTubeHtml(searchUrl) {
   const youtubeResponse = await fetch(searchUrl, {
+    signal: AbortSignal.timeout(7000),
+    redirect: 'error',
     headers: {
       'accept-language': 'en-US,en;q=0.9,es;q=0.8',
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'
@@ -297,61 +289,29 @@ function slugify(value = '') {
     .replace(/^_+|_+$/g, '') || 'youtube_search';
 }
 
-function topicFromVideo(video) {
-  return {
-    key: video.topicKey || `youtube_${slugify(video.sourceSearchTerm || video.topic || 'search')}`,
-    label: video.topic || video.sourceSearchTerm || 'YouTube Search',
-    file: 'discovered-data.js',
-    description: `Videos vistos desde ${video.source || 'LOOP'}.`
-  };
-}
-
-function mergeByKey(existing, incoming, keyName) {
-  const byKey = new Map();
-  [...existing, ...incoming].filter(Boolean).forEach(item => {
-    const key = item[keyName] || item.id;
-    if (!key) return;
-    byKey.set(key, { ...(byKey.get(key) || {}), ...item });
-  });
-  return [...byKey.values()];
-}
-
-async function readCatalog() {
-  if (!existsSync(CATALOG_PATH)) return { topics: [], videos: [] };
-  const source = await readFile(CATALOG_PATH, 'utf8');
-  const json = source.match(/window\.LOOP_DISCOVERED\s*=\s*(\{[\s\S]*\});?\s*$/)?.[1];
-  if (!json) return { topics: [], videos: [] };
-  return JSON.parse(json);
-}
-
-async function writeCatalog(catalog) {
-  const source = `window.LOOP_DISCOVERED = ${JSON.stringify(catalog, null, 2)};\n`;
-  await writeFile(CATALOG_PATH, source, 'utf8');
-}
-
-async function readBody(request) {
-  const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-async function serveStatic(requestUrl, response) {
-  const cleanPath = decodeURIComponent(requestUrl.pathname).replace(/^\/+/, '') || 'index.html';
+async function serveStatic(requestUrl, response, headOnly = false) {
+  let cleanPath;
+  try { cleanPath = decodeURIComponent(requestUrl.pathname).replace(/^\/+/, '') || 'index.html'; }
+  catch { sendText(response, 400, 'Invalid path'); return; }
+  if (!PUBLIC_FILES.has(cleanPath)) { sendText(response, 404, 'Not found'); return; }
   const resolvedPath = path.resolve(__dirname, cleanPath);
-
-  if (!resolvedPath.startsWith(__dirname)) {
+  let filePath;
+  try { filePath = await realpath(resolvedPath); }
+  catch (error) { if (error.code === 'ENOENT') {sendText(response, 404, 'Not found'); return;} throw error; }
+  const relativePath = path.relative(await realpath(__dirname), filePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     sendText(response, 403, 'Forbidden');
     return;
   }
 
-  const filePath = existsSync(resolvedPath) ? resolvedPath : path.join(__dirname, 'index.html');
   const extension = path.extname(filePath);
   const body = await readFile(filePath);
   response.writeHead(200, {
     'content-type': MIME_TYPES.get(extension) || 'application/octet-stream',
-    'cache-control': 'no-store'
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff'
   });
-  response.end(body);
+  response.end(headOnly ? undefined : body);
 }
 
 function sendJson(response, status, payload) {

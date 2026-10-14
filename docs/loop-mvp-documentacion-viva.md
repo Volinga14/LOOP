@@ -1,5 +1,7 @@
 # LOOP MVP — Documentación viva
 
+> Estado actualizado el 14 de octubre de 2026: la interfaz actual es principalmente española, con catálogo inicial y descubierto, feedback local por vídeo y PWA. La persistencia compartida y el algoritmo de recomendación siguen pendientes. El estado técnico vigente, las correcciones verificadas y las prioridades están en [Correcciones de estabilización](correcciones-estabilizacion.md). Las decisiones y listas del 15 de mayo que siguen en este documento se conservan como planificación histórica y no certifican implementación.
+
 ## 1. Propósito del documento
 
 Este documento recoge el estado actual del MVP de LOOP: qué estamos construyendo, qué capacidades tiene, qué decisiones se han tomado, qué queda pendiente y cuáles son los próximos pasos.
